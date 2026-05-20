@@ -44,8 +44,18 @@ def test_canonical_bugbot_var_takes_precedence_over_alias(monkeypatch):
     assert s.bitbucket_app_password.get_secret_value() == "canonical"
 
 
-def test_claude_effort_default_is_high(monkeypatch):
+def test_claude_effort_defaults_to_none(monkeypatch):
+    # Default is None because claude-code 2.1.x silently fails when
+    # `--effort` is passed alongside `-p`. The orchestrator omits the flag
+    # entirely when this is None. Re-enable when upstream is fixed.
     _set_required(monkeypatch)
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.claude_effort is None
+
+
+def test_claude_effort_accepts_explicit_high(monkeypatch):
+    _set_required(monkeypatch)
+    monkeypatch.setenv("BUGBOT_CLAUDE_EFFORT", "high")
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.claude_effort == "high"
 

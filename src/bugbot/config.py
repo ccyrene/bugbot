@@ -40,10 +40,13 @@ class Settings(BaseSettings):
     # ---- Claude Code CLI ------------------------------------------------
     claude_cli_path: str = "claude"
     claude_model: str = "sonnet"
-    # `--effort` controls how much reasoning Claude does. `high` is a good
-    # default for a code-review bot (worth the extra tokens). Allowed:
-    # low | medium | high | xhigh | max.
-    claude_effort: ClaudeEffort = "high"
+    # `--effort` controls how much reasoning Claude does. Allowed:
+    # low | medium | high | xhigh | max. Leave None to omit the flag and
+    # let the CLI use its default — **strongly recommended** at the
+    # moment because `--effort` combined with `-p` is silently broken in
+    # claude-code 2.1.x (process exits 0 with empty stdout). Set to a
+    # non-None level once the CLI fix lands upstream.
+    claude_effort: ClaudeEffort | None = None
     claude_timeout_seconds: float = 600.0
     # Read-only tools we let the model use inside the cloned working tree.
     # Comma-separated. Never include Bash/Edit/Write here.
