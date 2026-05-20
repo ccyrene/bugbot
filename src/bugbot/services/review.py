@@ -17,6 +17,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from importlib.resources import files as resource_files
+from pathlib import Path
 from typing import Literal
 
 from bugbot.clients.bitbucket import BitbucketClient, InlineComment
@@ -83,6 +84,73 @@ def _truncate_diff(diff: str, max_chars: int) -> str:
     if len(diff) <= max_chars:
         return diff
     return diff[:max_chars] + f"\n\n… [truncated: diff exceeded {max_chars} chars]"
+
+
+_LANG_BY_EXT = {
+    "py": "python", "js": "javascript", "ts": "typescript", "tsx": "tsx",
+    "jsx": "jsx", "go": "go", "rs": "rust", "java": "java", "kt": "kotlin",
+    "swift": "swift", "rb": "ruby", "php": "php", "cs": "csharp", "c": "c",
+    "h": "c", "cpp": "cpp", "hpp": "cpp", "sh": "bash", "bash": "bash",
+    "zsh": "bash", "yml": "yaml", "yaml": "yaml", "json": "json", "toml": "toml",
+    "md": "markdown", "sql": "sql", "html": "html", "css": "css",
+    "scss": "scss", "dockerfile": "dockerfile",
+}
+
+
+def _lang_hint(path: str) -> str:
+    name = path.rsplit("/", 1)[-1].lower()
+    if name == "dockerfile":
+        return "dockerfile"
+    ext = name.rsplit(".", 1)[-1] if "." in name else ""
+    return _LANG_BY_EXT.get(ext, "")
+
+
+def _render_changed_files(
+    files: list[FileDiff], cwd: Path, max_total_bytes: int,
+) -> str:
+    """Inline the *post-change* content of each changed file in the user
+    prompt, capped at `max_total_bytes`. Read from the cloned working tree
+    (cheap, already on disk; avoids an extra Bitbucket API round-trip per
+    file).
+
+    Skips deletions, binary files, and anything missing from disk (e.g.
+    submodules, symlinks). Caps per-file to keep one giant file from
+    eating the whole budget.
+    """
+    if not files:
+        return "_No files changed._"
+
+    per_file_cap = max(max_total_bytes // 4, 8_000)
+    blocks: list[str] = []
+    total = 0
+    skipped_for_budget: list[str] = []
+
+    for f in files:
+        if f.is_deleted or f.is_binary:
+            continue
+        p = cwd / f.path
+        if not p.is_file():
+            continue
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if len(content) > per_file_cap:
+            content = content[:per_file_cap] + f"\n\n… [truncated, file is {len(content)} chars]"
+        if total + len(content) > max_total_bytes:
+            skipped_for_budget.append(f.path)
+            continue
+        lang = _lang_hint(f.path)
+        blocks.append(f"### `{f.path}` (full content)\n\n```{lang}\n{content}\n```")
+        total += len(content)
+
+    if skipped_for_budget:
+        blocks.append(
+            "### Omitted (token budget)\n\n"
+            + "\n".join(f"- `{p}`" for p in skipped_for_budget)
+        )
+
+    return "\n\n".join(blocks) if blocks else "_No readable file content._"
 
 
 _JSON_RE = re.compile(r"\{[\s\S]*\}")
@@ -365,10 +433,18 @@ class Reviewer:
         with clone_ctx as clone:
             log.info("clone ready at {} @ {}", clone.path, clone.head_commit[:8])
 
-            # Build LLM input. Diff is sent in-prompt (LLM sees it directly);
-            # full files are reachable via the Read tool in `cwd`.
+            # Build LLM input. Inline the *full post-change content* of
+            # every changed file directly in the prompt (Cursor-style) so
+            # the model doesn't have to round-trip a Read tool call per
+            # file. Diff is still included so the model can see *what*
+            # changed. Tools remain available for inspecting un-changed
+            # files (callers, configs, schemas) only when needed.
             truncated = _truncate_diff(diff_text, s.max_diff_chars)
             safe_diff = redact(truncated)
+            files_block = _render_changed_files(
+                files, Path(clone.path), s.max_file_chars,
+            )
+            safe_files_block = redact(files_block)
             user_prompt = self._user_template.format(
                 title=pr.title or "(no title)",
                 author=pr.author,
@@ -376,6 +452,7 @@ class Reviewer:
                 destination_branch=pr.destination_branch,
                 description=pr.description or "_(no description)_",
                 security_findings_block=_format_security_block(scanner_hits),
+                changed_files_block=safe_files_block,
                 diff=safe_diff,
                 repo_path=str(clone.path),
                 head_commit=clone.head_commit,

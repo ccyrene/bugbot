@@ -8,11 +8,14 @@
 ## Description
 {description}
 
-## Repository working tree
-The PR's source branch is checked out at the current working directory (`{repo_path}`). Use `Read`, `Grep`, `Glob` to inspect any file you need to verify a finding. Tools are read-only.
-
 ## Pre-scan: sensitive-data findings
 {security_findings_block}
+
+## Full content of changed files
+
+The post-change content of every file touched by this PR is inlined below. **Default to reading from this section** — do not call `Read` on these paths.
+
+{changed_files_block}
 
 ## Unified diff
 
@@ -20,4 +23,8 @@ The PR's source branch is checked out at the current working directory (`{repo_p
 {diff}
 ```
 
-Review the diff per the rules in the system prompt. Verify suspicions via the tools where useful. Return JSON only.
+## Repository working tree
+
+The PR's source branch is also checked out at `{repo_path}`. Use `Read`, `Grep`, `Glob` **only** to inspect files that are *not* in the changed-files section above (e.g. callers, configs, schemas, sibling tests). Do not re-read changed files — their full content is already in the user message.
+
+Review per the rules in the system prompt. Return JSON only.

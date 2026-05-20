@@ -93,6 +93,9 @@ class Settings(BaseSettings):
     fail_on_severity: Severity = Severity.CRITICAL  # informational only in server mode
     max_inline_comments: int = Field(default=20, ge=0)
     max_diff_chars: int = Field(default=120_000, ge=1_000)
+    # Total cap on inlined post-change file content in the prompt.
+    # Each file is also individually capped at max_file_chars / 4.
+    max_file_chars: int = Field(default=200_000, ge=1_000)
     ignore_globs: str = "*.lock,*.min.js,*.map,vendor/**,node_modules/**,dist/**,build/**"
     dry_run: bool = False
 
