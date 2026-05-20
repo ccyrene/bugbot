@@ -53,6 +53,9 @@ class ExistingComment(BaseModel):
     content: str
 
 
+_TOKEN_AUTH_USERNAME = "x-token-auth"
+
+
 class BitbucketClient:
     def __init__(
         self,
@@ -64,10 +67,25 @@ class BitbucketClient:
         base_url: str = "https://api.bitbucket.org/2.0",
         timeout: float = 60.0,
     ) -> None:
+        # Pick auth mode:
+        #   * `x-token-auth` sentinel  → Bearer (Repository / Workspace
+        #     Access Tokens, format ATCTT3…). Bitbucket Cloud requires
+        #     Bearer for these tokens; HTTP basic with `x-token-auth` is
+        #     legacy and gets 401 on most v2 endpoints.
+        #   * any other username        → HTTP Basic Auth (App Passwords
+        #     and Atlassian account API tokens use email as username).
+        headers: dict[str, str] = {"Accept": "application/json"}
+        auth: tuple[str, str] | None
+        if username == _TOKEN_AUTH_USERNAME:
+            headers["Authorization"] = f"Bearer {app_password}"
+            auth = None
+        else:
+            auth = (username, app_password)
+
         self._client = httpx.Client(
             base_url=base_url,
-            auth=(username, app_password),
-            headers={"Accept": "application/json"},
+            auth=auth,
+            headers=headers,
             timeout=timeout,
         )
         self._workspace = workspace
@@ -75,6 +93,9 @@ class BitbucketClient:
         # Stored so the reviewer can hand them to the repo-clone helper
         # without round-tripping through Settings again. The app_password
         # never leaves this process; it's not logged or serialised.
+        # Note: git clone over HTTPS still uses `x-token-auth:<token>@…`
+        # basic-auth URL form, which Bitbucket continues to accept for git
+        # even though REST requires Bearer.
         self._username = username
         self._app_password = app_password
 

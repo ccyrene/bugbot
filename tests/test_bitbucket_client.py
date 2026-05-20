@@ -26,6 +26,68 @@ def _client() -> BitbucketClient:
 
 
 @respx.mock
+def test_x_token_auth_username_switches_to_bearer():
+    """Repository/Workspace Access Tokens (ATCTT3…) require Bearer; the
+    legacy `x-token-auth` basic-auth username form was deprecated for the
+    v2 REST API. When the caller passes that sentinel, we MUST send a
+    Bearer header, not a Basic Authorization header."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={
+            "id": 1, "title": "t", "description": "",
+            "source": {"branch": {"name": "f"}, "commit": {"hash": "a"}},
+            "destination": {"branch": {"name": "m"}, "commit": {"hash": "b"}},
+            "author": {"display_name": "x"},
+        })
+
+    respx.get(
+        "https://api.bitbucket.org/2.0/repositories/my-ws/my-repo/pullrequests/1"
+    ).mock(side_effect=handler)
+
+    BitbucketClient(
+        username="x-token-auth", app_password="ATCTT3xyz",
+        workspace="my-ws", repo_slug="my-repo",
+    ).get_pull_request(1)
+
+    auth_header = captured["headers"].get("authorization") or ""
+    assert auth_header == "Bearer ATCTT3xyz"
+
+
+@respx.mock
+def test_non_sentinel_username_uses_basic_auth():
+    """For App Passwords and Atlassian API tokens, basic auth with the
+    user's email is the right move."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["headers"] = dict(request.headers)
+        return httpx.Response(200, json={
+            "id": 1, "title": "t", "description": "",
+            "source": {"branch": {"name": "f"}, "commit": {"hash": "a"}},
+            "destination": {"branch": {"name": "m"}, "commit": {"hash": "b"}},
+            "author": {"display_name": "x"},
+        })
+
+    respx.get(
+        "https://api.bitbucket.org/2.0/repositories/my-ws/my-repo/pullrequests/1"
+    ).mock(side_effect=handler)
+
+    BitbucketClient(
+        username="me@example.com", app_password="ATATT3xyz",
+        workspace="my-ws", repo_slug="my-repo",
+    ).get_pull_request(1)
+
+    # httpx encodes basic auth: "Basic base64(user:pass)"
+    import base64
+    auth_header = captured["headers"].get("authorization") or ""
+    assert auth_header.startswith("Basic ")
+    decoded = base64.b64decode(auth_header.removeprefix("Basic ")).decode()
+    assert decoded == "me@example.com:ATATT3xyz"
+
+
+@respx.mock
 def test_get_pull_request_url_and_parsing():
     route = respx.get(
         "https://api.bitbucket.org/2.0/repositories/my-ws/my-repo/pullrequests/42"
