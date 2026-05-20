@@ -81,9 +81,9 @@ cp .env.example .env                 && $EDITOR .env
 cp Caddyfile.example Caddyfile       && $EDITOR Caddyfile
 
 # 4. (Auth path B only) authenticate the host's Claude subscription:
-#    Install Claude Code CLI on the host, run `claude login` once,
-#    then edit docker-compose.yml to uncomment the bind-mount line:
-#        - /root/.claude:/home/bugbot/.claude:ro
+#    sudo bash ../scripts/install-host.sh
+#    (installs Node + claude CLI, runs `claude login`, prints the
+#    docker-compose bind-mount line to uncomment)
 
 # 5. Bring it up.
 docker compose up -d --build
