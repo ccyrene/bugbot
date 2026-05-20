@@ -96,7 +96,11 @@ class Settings(BaseSettings):
     ignore_globs: str = "*.lock,*.min.js,*.map,vendor/**,node_modules/**,dist/**,build/**"
     dry_run: bool = False
 
-    bot_marker: str = "<!-- bugbot:v1 -->"
+    # Substring stamped into every bot-posted comment for idempotency.
+    # Bitbucket Cloud's comment renderer doesn't strip HTML comments, so we
+    # use a plain code-friendly tag instead — gets rendered as `bugbot:v1`
+    # via an inline code span in the comment template.
+    bot_marker: str = "bugbot:v1"
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 

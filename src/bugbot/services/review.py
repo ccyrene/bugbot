@@ -203,53 +203,100 @@ def _already_commented(
     return keys
 
 
-def _format_inline_body(f: Finding, marker: str) -> str:
+_SEVERITY_BADGE = {
+    Severity.CRITICAL: "🔴 critical",
+    Severity.HIGH:     "🟠 high",
+    Severity.MEDIUM:   "🟡 medium",
+    Severity.LOW:      "🔵 low",
+    Severity.NONE:     "none",
+}
+
+
+def reviewer_display_name(model: str) -> str:
+    """Human-readable name for the LLM doing the review.
+
+    `sonnet`            -> "Claude Sonnet"
+    `opus`              -> "Claude Opus"
+    `haiku`             -> "Claude Haiku"
+    `claude-sonnet-4-6` -> "Claude Sonnet 4.6"
+    `claude-opus-4-7`   -> "Claude Opus 4.7"
+    fallback            -> "Claude"
+    """
+    m = model.strip().lower()
+    if m in {"sonnet", "opus", "haiku"}:
+        return f"Claude {m.capitalize()}"
+    if m.startswith("claude-"):
+        parts = m[len("claude-"):].split("-")
+        if not parts:
+            return "Claude"
+        family = parts[0].capitalize()
+        version = ".".join(parts[1:])
+        out = f"Claude {family}"
+        if version:
+            out += f" {version}"
+        return out
+    return "Claude"
+
+
+def _attribution(name: str, marker: str) -> str:
+    # Discreet attribution footer + grep-able marker. The marker is rendered
+    # as inline code so Bitbucket doesn't show it as HTML-comment plaintext
+    # but it's still a substring of the rendered comment for idempotency.
+    return f"_— {name} · `{marker}`_"
+
+
+def _format_inline_body(f: Finding, name: str, marker: str) -> str:
     return (
-        f"{marker}\n"
-        f"**[{f.severity.value.upper()}] {f.category}** — {f.message}"
+        f"**{_SEVERITY_BADGE[f.severity]} · {f.category}**\n\n"
+        f"{f.message}\n\n"
+        f"{_attribution(name, marker)}"
     )
 
 
-def _format_summary_body(result: ReviewResult, marker: str) -> str:
+def _format_summary_body(result: ReviewResult, name: str, marker: str) -> str:
+    heading = f"## {name} · review"
+
     if not result.findings:
-        body = (
-            f"{marker}\n\n"
-            f"### bugbot review\n\n"
-            f"{result.summary or 'No issues detected by automated review.'}\n\n"
-            f"_No actionable findings._"
+        body = result.summary or "No issues detected."
+        return (
+            f"{heading}\n\n"
+            f"{body}\n\n"
+            f"_No findings._\n\n"
+            f"{_attribution(name, marker)}"
         )
-        return body
 
     by_sev: dict[Severity, int] = {}
     for f in result.findings:
         by_sev[f.severity] = by_sev.get(f.severity, 0) + 1
-    counts = ", ".join(
-        f"{by_sev[s]} {s.value}" for s in (
-            Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW
-        ) if s in by_sev
+    counts = " · ".join(
+        f"**{by_sev[s]}** {s.value}"
+        for s in (Severity.CRITICAL, Severity.HIGH, Severity.MEDIUM, Severity.LOW)
+        if s in by_sev
     )
 
     lines = [
-        f"{marker}",
-        "",
-        "### bugbot review",
+        heading,
         "",
         result.summary or "_(no summary)_",
+        "",
+        "---",
         "",
         f"**Findings:** {counts}",
         "",
         "| Severity | File | Line | Category |",
-        "|---|---|---|---|",
+        "| --- | --- | --- | --- |",
     ]
     for f in result.findings:
         lines.append(
-            f"| {f.severity.value} | `{f.file}` | {f.line} | {f.category} |"
+            f"| {_SEVERITY_BADGE[f.severity]} | `{f.file}` | {f.line} | {f.category} |"
         )
-    lines.extend([
+    lines += [
         "",
-        "_Inline comments have been posted on the specific lines. "
-        "Scanner findings (severity = secret-leak) are mandatory — rotate the credential before merging._",
-    ])
+        "Inline comments posted on the specific lines above. "
+        "Scanner findings (`secret-leak`) are mandatory — rotate before merging.",
+        "",
+        _attribution(name, marker),
+    ]
     return "\n".join(lines)
 
 
@@ -385,6 +432,7 @@ class Reviewer:
     def _post(self, result: ReviewResult) -> None:
         s = self._s
         marker = s.bot_marker
+        name = reviewer_display_name(s.claude_model)
 
         # Idempotency: pull existing bot comments first.
         if not s.dry_run:
@@ -403,7 +451,7 @@ class Reviewer:
                 log.info("skip already-commented line {}:{}", f.file, f.line)
                 continue
 
-            body = _format_inline_body(f, marker)
+            body = _format_inline_body(f, name, marker)
             if s.dry_run:
                 print(f"[DRY-RUN inline] {f.file}:{f.line}\n{body}\n")
             else:
@@ -415,7 +463,7 @@ class Reviewer:
         result.posted_inline = posted
 
         # Summary always — useful audit trail even when no findings.
-        summary_body = _format_summary_body(result, marker)
+        summary_body = _format_summary_body(result, name, marker)
         if s.dry_run:
             print(f"[DRY-RUN summary]\n{summary_body}\n")
         else:
