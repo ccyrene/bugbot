@@ -1,0 +1,100 @@
+# =====================================================================
+# bugbot — Docker Compose for a single VPS droplet.
+#
+# Stack:
+#   * caddy  — TLS termination, path allowlist, hardening headers
+#   * bugbot — FastAPI webhook server + claude CLI worker
+#
+# Quickstart on the droplet:
+#   1. Install Docker + docker compose plugin.
+#   2. Clone the repo (or scp the source).
+#   3. cp deploy/.env.example deploy/.env  &&  $EDITOR deploy/.env
+#   4. cp deploy/Caddyfile.example deploy/Caddyfile  &&  $EDITOR Caddyfile
+#      (replace the hostname; point the A record at the droplet first).
+#   5. cd deploy  &&  docker compose up -d --build
+#   6. In Bitbucket: create a webhook → https://<your-host>/webhook/bitbucket
+#
+# Auth for the `claude` CLI (pick one):
+#   A. Set ANTHROPIC_API_KEY in .env.  Simplest, pay-per-token.
+#   B. On the host, run `claude login` once, then bind-mount the
+#      resulting ~/.claude/ into the container (see the commented
+#      `volumes` line below).  Uses your Claude subscription, no
+#      separate API key.
+# =====================================================================
+
+services:
+  caddy:
+    image: caddy:2.8-alpine
+    container_name: bugbot-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persist certs + acme state across restarts.
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - bugbot_net
+    depends_on:
+      - bugbot
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  bugbot:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: bugbot:0.1.0
+    container_name: bugbot
+    restart: unless-stopped
+    env_file:
+      - .env
+    expose:
+      # Internal-only; reachable from caddy via the docker network.
+      - "8080"
+    # Bind-mount the host's ~/.claude/ if you authenticated via
+    # `claude login` (option B). Comment out if you set ANTHROPIC_API_KEY.
+    volumes:
+      - claude_state:/home/bugbot/.claude
+      # - /root/.claude:/home/bugbot/.claude:ro
+    networks:
+      - bugbot_net
+    # We need to clone repos into a writable temp dir — give it a
+    # bounded tmpfs so untrusted code never persists on disk.
+    tmpfs:
+      - /tmp:size=512m,mode=1777,exec
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          # Clone + LLM run is memory-hungrier than before; bump headroom.
+          memory: 2g
+          cpus: "1.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  caddy_data:
+  caddy_config:
+  claude_state:
+
+networks:
+  bugbot_net:
+    driver: bridge

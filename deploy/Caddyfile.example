@@ -1,0 +1,72 @@
+# =====================================================================
+# Caddyfile — TLS termination + reverse proxy in front of bugbot.
+#
+# Caddy gives us:
+#   * Automatic Let's Encrypt certificates (no certbot dance)
+#   * HTTPS by default; HTTP→HTTPS redirect free
+#   * Strict allowlist of paths (everything else gets 404)
+#   * Real X-Forwarded-For passed through
+#   * Small attack surface vs nginx
+#
+# Replace `bugbot.example.com` with your real hostname before deploying.
+# The compose stack runs this image; you don't need Caddy on the host.
+# =====================================================================
+
+{
+    # Email used by Caddy when registering with Let's Encrypt.
+    email ops@example.com
+
+    # Disable the admin endpoint — nothing on the box should be able to
+    # reconfigure Caddy at runtime.
+    admin off
+}
+
+bugbot.example.com {
+    # ----- Hardening headers -----------------------------------------
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        Referrer-Policy           "no-referrer"
+        Permissions-Policy        "interest-cohort=()"
+        -Server
+    }
+
+    # ----- Path allowlist --------------------------------------------
+    # Only the webhook + healthcheck are exposed. Everything else 404s
+    # so scanners get nothing useful.
+    @allowed {
+        path /webhook/bitbucket /healthz
+    }
+    handle @allowed {
+        # Cap request body — Bitbucket payloads are usually < 1 MB.
+        request_body {
+            max_size 4MB
+        }
+
+        # The bugbot service name comes from docker-compose.
+        reverse_proxy bugbot:8080 {
+            # Pass the real client IP. Bugbot honours this only when
+            # BUGBOT_TRUST_FORWARDED_FOR=true.
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+
+            # Short read timeout — webhook handler should respond in ms.
+            transport http {
+                read_timeout 30s
+            }
+        }
+    }
+
+    handle {
+        respond 404
+    }
+
+    # Structured access log for ops.
+    log {
+        output stdout
+        format json
+        level INFO
+    }
+}
