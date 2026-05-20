@@ -1,8 +1,10 @@
 from enum import Enum
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+ClaudeEffort = Literal["low", "medium", "high", "xhigh", "max"]
 
 
 class Severity(str, Enum):
@@ -38,14 +40,29 @@ class Settings(BaseSettings):
     # ---- Claude Code CLI ------------------------------------------------
     claude_cli_path: str = "claude"
     claude_model: str = "sonnet"
+    # `--effort` controls how much reasoning Claude does. `high` is a good
+    # default for a code-review bot (worth the extra tokens). Allowed:
+    # low | medium | high | xhigh | max.
+    claude_effort: ClaudeEffort = "high"
     claude_timeout_seconds: float = 600.0
     # Read-only tools we let the model use inside the cloned working tree.
     # Comma-separated. Never include Bash/Edit/Write here.
     claude_allowed_tools: str = "Read,Grep,Glob"
 
     # ---- Bitbucket Cloud ------------------------------------------------
-    bitbucket_username: str
-    bitbucket_app_password: SecretStr
+    # Default to the literal "x-token-auth" — the right value for Bitbucket
+    # Repository / Workspace Access Tokens. Override only if you're using
+    # an App Password (then this is your Bitbucket username).
+    bitbucket_username: str = "x-token-auth"
+    # Accept either `BUGBOT_BITBUCKET_APP_PASSWORD` (canonical) or the
+    # shorter `BITBUCKET_TOKEN` for users who already store their PAT under
+    # that name in CI / DO envs.
+    bitbucket_app_password: SecretStr = Field(
+        validation_alias=AliasChoices(
+            "BUGBOT_BITBUCKET_APP_PASSWORD",
+            "BITBUCKET_TOKEN",
+        ),
+    )
     bitbucket_base_url: str = "https://api.bitbucket.org/2.0"
     bitbucket_timeout_seconds: float = 60.0
 

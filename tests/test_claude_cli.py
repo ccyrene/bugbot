@@ -72,6 +72,31 @@ def test_chat_refuses_dangerous_tools(fake_which):
     assert "Bash" in str(ei.value)
 
 
+def test_chat_passes_effort_flag(fake_which):
+    envelope = {"type": "result", "result": "x", "is_error": False, "usage": {}}
+    with patch("bugbot.clients.claude_cli.subprocess.run",
+               return_value=_make_completed(stdout=json.dumps(envelope))) as run:
+        ClaudeCliClient().chat(system_prompt="s", user_prompt="u", effort="high")
+    argv = run.call_args.args[0]
+    idx = argv.index("--effort")
+    assert argv[idx + 1] == "high"
+
+
+def test_chat_omits_effort_when_none(fake_which):
+    envelope = {"type": "result", "result": "x", "is_error": False, "usage": {}}
+    with patch("bugbot.clients.claude_cli.subprocess.run",
+               return_value=_make_completed(stdout=json.dumps(envelope))) as run:
+        ClaudeCliClient().chat(system_prompt="s", user_prompt="u")
+    argv = run.call_args.args[0]
+    assert "--effort" not in argv
+
+
+def test_chat_rejects_invalid_effort(fake_which):
+    with pytest.raises(ClaudeCliError) as ei:
+        ClaudeCliClient().chat(system_prompt="s", user_prompt="u", effort="ludicrous")
+    assert "ludicrous" in str(ei.value)
+
+
 def test_chat_defaults_to_readonly_tools(fake_which):
     envelope = {"type": "result", "result": "x", "is_error": False, "usage": {}}
     with patch("bugbot.clients.claude_cli.subprocess.run",

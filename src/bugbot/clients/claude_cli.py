@@ -77,6 +77,7 @@ class ClaudeCliClient:
         user_prompt: str,
         cwd: str | None = None,
         allowed_tools: list[str] | None = None,
+        effort: str | None = None,
     ) -> ClaudeResponse:
         """Send a system+user prompt pair and return the model's text.
 
@@ -92,6 +93,10 @@ class ClaudeCliClient:
                          non-interactively. We default to read-only tools
                          (Read, Grep, Glob). NEVER pass Bash/Edit/Write
                          here — bugbot reviews untrusted PR code.
+          effort:        Claude reasoning effort level: one of
+                         low / medium / high / xhigh / max. Optional —
+                         when None we don't pass `--effort` and let the
+                         CLI use its default.
         """
         tools = allowed_tools if allowed_tools is not None else ["Read", "Grep", "Glob"]
         # Reject obviously dangerous tools at the boundary, regardless of
@@ -103,6 +108,9 @@ class ClaudeCliClient:
             raise ClaudeCliError(
                 f"refusing to allow dangerous tools in PR review: {bad}"
             )
+
+        if effort is not None and effort not in {"low", "medium", "high", "xhigh", "max"}:
+            raise ClaudeCliError(f"invalid effort level: {effort!r}")
 
         argv = [
             self._cli,
@@ -116,6 +124,8 @@ class ClaudeCliClient:
             # read-only by construction.
             "--permission-mode", "default",
         ]
+        if effort is not None:
+            argv += ["--effort", effort]
         log.debug(
             "invoking claude CLI: argv={} stdin_chars={} cwd={} tools={}",
             argv, len(user_prompt), cwd, tools,

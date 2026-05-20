@@ -342,6 +342,7 @@ class Reviewer:
                     user_prompt=user_prompt,
                     cwd=str(clone.path),
                     allowed_tools=s.claude_allowed_tools_list,
+                    effort=s.claude_effort,
                 )
             except ClaudeCliError as exc:
                 log.error("claude CLI failed: {}", exc)
