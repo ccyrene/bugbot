@@ -87,6 +87,12 @@ class BitbucketClient:
             auth=auth,
             headers=headers,
             timeout=timeout,
+            # Bitbucket Cloud's `/pullrequests/{id}/diff` endpoint replies
+            # with HTTP 302 → the canonical diff URL keyed on the source/
+            # destination commit pair. httpx does NOT follow redirects by
+            # default, so without this we'd silently treat the 302 as an
+            # empty diff and review nothing.
+            follow_redirects=True,
         )
         self._workspace = workspace
         self._repo_slug = repo_slug

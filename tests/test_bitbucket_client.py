@@ -118,6 +118,29 @@ def test_get_diff_returns_raw_text():
 
 
 @respx.mock
+def test_get_diff_follows_302_redirect():
+    """Bitbucket Cloud responds to /pullrequests/{id}/diff with a 302 that
+    points at the canonical commit-pair diff URL. We MUST follow it or we'd
+    silently treat empty 302 bodies as 'nothing to review'."""
+    canonical = (
+        "https://api.bitbucket.org/2.0/repositories/my-ws/my-repo/diff/"
+        "my-ws/my-repo:aaa..bbb?from_pullrequest_id=42"
+    )
+    respx.get(
+        "https://api.bitbucket.org/2.0/repositories/my-ws/my-repo/pullrequests/42/diff"
+    ).respond(
+        status_code=302,
+        headers={"Location": canonical},
+        text="",
+    )
+    respx.get(canonical).respond(text="diff --git a/x b/x\n+hello\n")
+
+    out = _client().get_pull_request_diff(42)
+    assert "diff --git" in out
+    assert "+hello" in out
+
+
+@respx.mock
 def test_post_inline_comment_payload_shape():
     captured = {}
 
