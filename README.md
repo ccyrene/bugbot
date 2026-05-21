@@ -1,14 +1,17 @@
 # bugbot
 
-**Self-hosted AI PR reviewer for Bitbucket Cloud — Claude Code CLI backed, webhook-driven, deployable to any VPS.**
+**Self-hosted AI PR reviewer for Bitbucket Cloud *and* GitHub — Claude Code CLI backed, webhook-driven, deployable to any VPS.**
 
-Cursor's bugbot doesn't speak Bitbucket. This one does. It runs as a small
-FastAPI webhook server (e.g. on a Digital Ocean droplet), listens to
-Bitbucket PR events, **clones the PR branch into a sandboxed working tree**,
-and shells out to the `claude` CLI which inspects the full repo via
-read-only tools (`Read`, `Grep`, `Glob`) before posting inline + summary
-review comments. A pre-LLM secret scanner blocks credentials from ever
-reaching the model.
+Cursor's bugbot doesn't speak Bitbucket. This one speaks both Bitbucket
+Cloud and GitHub. It runs as a small FastAPI webhook server (e.g. on a
+Digital Ocean droplet), listens to PR events from either forge, **clones
+the PR branch into a sandboxed working tree**, and shells out to the
+`claude` CLI which inspects the full repo via read-only tools (`Read`,
+`Grep`, `Glob`) before posting inline + summary review comments. A
+pre-LLM secret scanner blocks credentials from ever reaching the model.
+
+You can enable either provider or both at the same time — each one has
+its own webhook endpoint, IP allowlist, and HMAC secret.
 
 ---
 
@@ -16,8 +19,8 @@ reaching the model.
 
 ```
 ┌─────────────────────┐  webhook   ┌────────────────────────────────────┐
-│  Bitbucket Cloud    │ ─────────▶ │  Caddy (auto-TLS, path allowlist)  │
-│  PR created/updated │            └────────────────┬───────────────────┘
+│  Bitbucket Cloud /  │ ─────────▶ │  Caddy (auto-TLS, path allowlist)  │
+│  GitHub PR events   │            └────────────────┬───────────────────┘
 └─────────────────────┘                             │
                                                     ▼
                               ┌─────────────────────────────────────────┐
@@ -89,11 +92,55 @@ cp Caddyfile.example Caddyfile       && $EDITOR Caddyfile
 docker compose up -d --build
 docker compose logs -f bugbot caddy
 
-# 6. Register the Bitbucket webhook (per repo):
-#      URL:     https://bugbot.yourdomain.com/webhook/bitbucket
-#      Secret:  same value as BUGBOT_WEBHOOK_SECRET in .env
-#      Trigger: Pull request → Created and Updated
+# 6a. Register the Bitbucket webhook (per repo):
+#       URL:     https://bugbot.yourdomain.com/webhook/bitbucket
+#       Secret:  same value as BUGBOT_WEBHOOK_SECRET in .env
+#       Trigger: Pull request → Created and Updated
+#
+# 6b. Register the GitHub webhook (per repo or per org):
+#       Settings → Webhooks → Add webhook
+#       Payload URL:  https://bugbot.yourdomain.com/webhook/github
+#       Content type: application/json
+#       Secret:       same value as BUGBOT_GITHUB_WEBHOOK_SECRET in .env
+#       Events:       "Let me select individual events" → Pull requests
 ```
+
+### Setting up GitHub support
+
+1. Create a **Fine-grained Personal Access Token** at
+   <https://github.com/settings/tokens?type=beta>. Repository access:
+   pick the repos you want bugbot to review. Required permissions:
+
+   - **Contents**: Read-only
+   - **Pull requests**: Read & write
+   - **Metadata**: Read-only (auto-included)
+
+   Set `BUGBOT_GITHUB_TOKEN` (or `GITHUB_TOKEN`) in `.env`. The token
+   serves both the REST API (Bearer auth) and `git clone` over HTTPS
+   (`https://x-access-token:<token>@github.com/...`).
+
+2. Generate a webhook secret: `openssl rand -hex 32`. Save it as
+   `BUGBOT_GITHUB_WEBHOOK_SECRET`.
+
+3. On each repo (or, for an org, **Settings → Webhooks** at the org
+   level) add a webhook:
+
+   | Field | Value |
+   |---|---|
+   | Payload URL | `https://<yourdomain>/webhook/github` |
+   | Content type | `application/json` |
+   | Secret | the value of `BUGBOT_GITHUB_WEBHOOK_SECRET` |
+   | SSL verification | enabled |
+   | Events | Pull requests only |
+   | Active | ✔ |
+
+4. `docker compose restart bugbot` to pick up the new env vars. Hitting
+   "Recent Deliveries → Redeliver" in GitHub is the fastest way to
+   verify the wiring.
+
+Bitbucket-only or GitHub-only deployments are fine: the unconfigured
+endpoint replies `503 — not configured` rather than silently accepting
+unsigned traffic.
 
 ### Claude CLI auth — two paths, pick one
 
@@ -111,9 +158,10 @@ docker compose logs -f bugbot caddy
 ## CLI
 
 ```bash
-bugbot serve                                 # start the webhook server
-bugbot review-pr my-ws my-repo 42            # one-off manual review (debug)
-bugbot scan pr.diff --fail-on high           # offline secret scan, no LLM
+bugbot serve                                            # start the webhook server
+bugbot review-pr my-ws my-repo 42                       # Bitbucket (default)
+bugbot review-pr acme widget 42 --provider github       # GitHub one-off review
+bugbot scan pr.diff --fail-on high                      # offline secret scan, no LLM
 bugbot version
 ```
 
@@ -140,15 +188,22 @@ All settings live in `deploy/.env` (prefix `BUGBOT_`). See
 | Variable | Default | Required | Notes |
 |---|---|---|---|
 | `ANTHROPIC_API_KEY` | — | A only | Set this XOR mount `~/.claude/` |
+
+> `*` — at least one provider must be configured. The config validator
+> refuses to start the server if no provider is set, or if an enabled
+> provider is missing its webhook secret.
 | `BUGBOT_CLAUDE_MODEL` | `sonnet` | | `sonnet`, `opus`, or full id |
 | `BUGBOT_CLAUDE_TIMEOUT_SECONDS` | `600` | | Subprocess timeout |
 | `BUGBOT_CLAUDE_ALLOWED_TOOLS` | `Read,Grep,Glob` | | Read-only by design. Bash/Edit/Write are refused at the client boundary |
-| `BUGBOT_BITBUCKET_USERNAME` | — | ✅ | Owner of the app password |
-| `BUGBOT_BITBUCKET_APP_PASSWORD` | — | ✅ | repository:read, pullrequest:read/write |
+| `BUGBOT_BITBUCKET_USERNAME` | `x-token-auth` | * | Owner of the app password / `x-token-auth` for Access Tokens |
+| `BUGBOT_BITBUCKET_APP_PASSWORD` | — | * | repository:read, pullrequest:read/write (also accepts `BITBUCKET_TOKEN`) |
+| `BUGBOT_GITHUB_TOKEN` | — | * | Fine-grained PAT — Contents: Read, Pull requests: Read & Write (also accepts `GITHUB_TOKEN`) |
+| `BUGBOT_GITHUB_WEBHOOK_SECRET` | — | * | Required iff GitHub enabled. Match the secret you put in the GitHub webhook config |
+| `BUGBOT_GITHUB_WEBHOOK_PATH` | `/webhook/github` | | URL path the GitHub webhook posts to |
 | `BUGBOT_GIT_CLONE_DEPTH` | `50` | | Shallow-clone depth |
 | `BUGBOT_GIT_CLONE_MAX_MB` | `512` | | Reject clones above this size |
-| `BUGBOT_WEBHOOK_SECRET` | — | ✅ | Match Bitbucket webhook config |
-| `BUGBOT_WEBHOOK_ENFORCE_IP_ALLOWLIST` | `true` | | Verify against ip-ranges.atlassian.com |
+| `BUGBOT_WEBHOOK_SECRET` | — | * | Required iff Bitbucket enabled. Match the Bitbucket webhook secret |
+| `BUGBOT_WEBHOOK_ENFORCE_IP_ALLOWLIST` | `true` | | Verify against ip-ranges.atlassian.com + api.github.com/meta `hooks` |
 | `BUGBOT_TRUST_FORWARDED_FOR` | `true` | | Caddy sits in front; we trust it |
 | `BUGBOT_MAX_CONCURRENT_REVIEWS` | `2` | | Each owns one clone + one CLI |
 | `BUGBOT_MAX_INLINE_COMMENTS` | `20` | | Hard cap per review |
@@ -239,11 +294,15 @@ commitments:
 
 ### Webhook
 
-- **HMAC-SHA256** of the raw body (constant-time compare).
-- **IP allowlist** refreshed from
-  [`ip-ranges.atlassian.com`](https://ip-ranges.atlassian.com/) every
-  hour. Fail-open exactly once if the first fetch fails; fail-closed
-  thereafter.
+- **HMAC-SHA256** of the raw body (constant-time compare). Bitbucket
+  signs in `X-Hub-Signature`; GitHub in `X-Hub-Signature-256`. **Each
+  provider has its own secret** — we refuse to share keys across forges
+  so a leak on one side doesn't grant access to the other's pipeline.
+- **IP allowlist** refreshed every hour from
+  [`ip-ranges.atlassian.com`](https://ip-ranges.atlassian.com/) (Bitbucket)
+  and [`api.github.com/meta`](https://api.github.com/meta) (GitHub —
+  `hooks` array). Fail-open exactly once if the first fetch fails;
+  fail-closed thereafter.
 - Both checks run **before** the body is parsed.
 
 ### Cloned PR code
@@ -280,8 +339,10 @@ commitments:
 
 ### Network surface
 
-- Two outbound destinations only:
-  - `api.bitbucket.org` (REST + git clone)
+- Outbound destinations:
+  - `api.bitbucket.org` (REST) + `bitbucket.org` (git clone) — only when Bitbucket is enabled
+  - `api.github.com` (REST) + `github.com` (git clone) — only when GitHub is enabled
+  - `ip-ranges.atlassian.com` and/or `api.github.com/meta` (IP allowlist refresh)
   - The Claude API endpoint (via the CLI; talks to `api.anthropic.com`)
 - No telemetry, no error reporting service, no auto-update.
 
@@ -298,11 +359,14 @@ bugbot/
 │   ├── cli/main.py            typer CLI: `serve` / `review-pr` / `scan`
 │   ├── server/
 │   │   ├── app.py             FastAPI app (lifespan + factory)
-│   │   ├── auth.py            HMAC verify + Atlassian IP allowlist
-│   │   ├── webhook.py         Event parser → ReviewJob
-│   │   └── worker.py          Bounded ThreadPoolExecutor + dedupe
+│   │   ├── auth.py            HMAC verify + Atlassian & GitHub IP allowlists
+│   │   ├── webhook.py         Bitbucket event parser → ReviewJob
+│   │   ├── webhook_github.py  GitHub event parser → ReviewJob
+│   │   └── worker.py          Bounded ThreadPoolExecutor + dedupe (per provider)
 │   ├── clients/
-│   │   ├── bitbucket.py       Cloud v2 API client (PR, diff, comments)
+│   │   ├── _provider.py       PullRequestProvider Protocol + shared models
+│   │   ├── bitbucket.py       Bitbucket Cloud v2 API client
+│   │   ├── github.py          GitHub REST v3 API client
 │   │   └── claude_cli.py      `claude -p` adapter (cwd + tools)
 │   ├── services/
 │   │   ├── diff.py            Unified-diff parser

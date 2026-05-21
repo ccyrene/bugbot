@@ -20,7 +20,7 @@ from importlib.resources import files as resource_files
 from pathlib import Path
 from typing import Literal
 
-from bugbot.clients.bitbucket import BitbucketClient, InlineComment
+from bugbot.clients._provider import InlineComment, PullRequestProvider
 from bugbot.clients.claude_cli import ClaudeCliClient, ClaudeCliError
 from bugbot.config import Settings, Severity
 from bugbot.libs.logging import get_logger
@@ -373,28 +373,37 @@ def _format_summary_body(result: ReviewResult, name: str, marker: str) -> str:
 
 class Reviewer:
     """One-shot reviewer for a single PR. Reusable across PRs — pass `pr_id`
-    explicitly to `run()` so the same instance can serve a webhook worker."""
+    explicitly to `run()` so the same instance can serve a webhook worker.
+
+    Takes any `PullRequestProvider` — `BitbucketClient`, `GitHubClient`,
+    or a future one. Provider-specific quirks (Bearer auth, commit_id on
+    inline comments, …) live behind that surface.
+    """
 
     def __init__(
         self,
         settings: Settings,
         *,
-        bitbucket: BitbucketClient,
+        provider: PullRequestProvider,
         claude: ClaudeCliClient,
     ) -> None:
         self._s = settings
-        self._bb = bitbucket
+        self._provider = provider
         self._llm = claude
         self._system_prompt = _load_prompt("system.md")
         self._user_template = _load_prompt("user.md")
+        # Captured during `run()` — needed when posting inline comments on
+        # GitHub, which anchors every review comment to a commit SHA.
+        self._head_commit: str = ""
 
     def run(self, pr_id: int) -> ReviewResult:
         s = self._s
-        pr = self._bb.get_pull_request(pr_id)
+        pr = self._provider.get_pull_request(pr_id)
+        self._head_commit = pr.source_commit
         log.info("PR #{} '{}' by {} ({} -> {})", pr.id, pr.title, pr.author,
                  pr.source_branch, pr.destination_branch)
 
-        diff_text = self._bb.get_pull_request_diff(pr_id)
+        diff_text = self._provider.get_pull_request_diff(pr_id)
         all_files = parse_unified_diff(diff_text)
         files = filter_files(all_files, s.ignore_glob_list)
         log.info("diff parsed: {} files, {} ignored",
@@ -412,11 +421,12 @@ class Reviewer:
         # files around the diff via its read-only tools. Cleaned up on exit.
         try:
             clone_ctx = clone_pr_branch(
-                workspace=self._bb.workspace,
-                repo_slug=self._bb.repo_slug,
+                host=self._provider.clone_host,
+                workspace=self._provider.workspace,
+                repo_slug=self._provider.repo_slug,
                 source_branch=pr.source_branch,
-                bitbucket_username=self._bb.username,
-                bitbucket_app_password=self._bb.app_password,
+                username=self._provider.username,
+                app_password=self._provider.app_password,
                 depth=s.git_clone_depth,
                 max_mb=s.git_clone_max_mb,
                 timeout=s.git_clone_timeout_seconds,
@@ -513,7 +523,7 @@ class Reviewer:
 
         # Idempotency: pull existing bot comments first.
         if not s.dry_run:
-            existing = self._bb.list_comments(result.pr_id)
+            existing = self._provider.list_comments(result.pr_id)
             already = _already_commented(existing, marker)
         else:
             already = set()
@@ -532,9 +542,15 @@ class Reviewer:
             if s.dry_run:
                 print(f"[DRY-RUN inline] {f.file}:{f.line}\n{body}\n")
             else:
-                self._bb.post_inline_comment(
+                self._provider.post_inline_comment(
                     result.pr_id,
-                    InlineComment(file=f.file, line=f.line, body=body),
+                    InlineComment(
+                        file=f.file,
+                        line=f.line,
+                        body=body,
+                        # Required by GitHub; ignored by Bitbucket.
+                        commit_id=self._head_commit or None,
+                    ),
                 )
             posted += 1
         result.posted_inline = posted
@@ -544,7 +560,7 @@ class Reviewer:
         if s.dry_run:
             print(f"[DRY-RUN summary]\n{summary_body}\n")
         else:
-            self._bb.post_summary_comment(result.pr_id, summary_body)
+            self._provider.post_summary_comment(result.pr_id, summary_body)
             result.posted_summary = True
 
 

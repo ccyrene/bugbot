@@ -33,13 +33,15 @@ bugbot.example.com {
     }
 
     # ----- Path allowlist --------------------------------------------
-    # Only the webhook + healthcheck are exposed. Everything else 404s
-    # so scanners get nothing useful.
+    # Only the webhook endpoints + healthcheck are exposed. Everything else
+    # 404s so scanners get nothing useful. `/webhook/github` is harmless
+    # to expose even on a Bitbucket-only deployment — bugbot itself
+    # responds 503 if GitHub isn't configured.
     @allowed {
-        path /webhook/bitbucket /healthz
+        path /webhook/bitbucket /webhook/github /healthz
     }
     handle @allowed {
-        # Cap request body — Bitbucket payloads are usually < 1 MB.
+        # Cap request body — webhook payloads are usually well under 1 MB.
         request_body {
             max_size 4MB
         }

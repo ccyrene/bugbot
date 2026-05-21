@@ -17,43 +17,35 @@ from __future__ import annotations
 from typing import Any, Iterator
 
 import httpx
-from pydantic import BaseModel
 
+from bugbot.clients._provider import (
+    ExistingComment,
+    InlineComment,
+    PullRequest,
+)
 from bugbot.libs.logging import get_logger
 from bugbot.libs.redact import redact
 
 log = get_logger("bitbucket")
 
 
+# Re-export so existing imports `from bugbot.clients.bitbucket import …`
+# keep working — the shared models live in `_provider` now.
+__all__ = [
+    "BitbucketClient",
+    "BitbucketError",
+    "PullRequest",
+    "InlineComment",
+    "ExistingComment",
+]
+
+
 class BitbucketError(RuntimeError):
     pass
 
 
-class PullRequest(BaseModel):
-    id: int
-    title: str
-    description: str = ""
-    source_branch: str
-    destination_branch: str
-    source_commit: str
-    destination_commit: str
-    author: str
-
-
-class InlineComment(BaseModel):
-    file: str
-    line: int
-    body: str
-
-
-class ExistingComment(BaseModel):
-    id: int
-    file: str | None
-    line: int | None
-    content: str
-
-
 _TOKEN_AUTH_USERNAME = "x-token-auth"
+_CLONE_HOST = "bitbucket.org"
 
 
 class BitbucketClient:
@@ -120,6 +112,10 @@ class BitbucketClient:
     @property
     def app_password(self) -> str:
         return self._app_password
+
+    @property
+    def clone_host(self) -> str:
+        return _CLONE_HOST
 
     # ------------------------------------------------------------------
     # internal

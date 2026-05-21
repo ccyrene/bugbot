@@ -45,17 +45,22 @@ class ClonedRepo:
     head_commit: str
 
 
-def _bitbucket_clone_url(*, workspace: str, repo_slug: str,
-                        username: str, app_password: str) -> str:
-    """Build an HTTPS URL with embedded basic-auth.
+def _clone_url(*, host: str, workspace: str, repo_slug: str,
+              username: str, app_password: str) -> str:
+    """Build an HTTPS URL with embedded basic-auth for `host`.
 
     URL-encode both username and password — usernames may contain `@`,
     passwords may contain `/` or `:`. Wrong encoding here = "remote not
     found" or auth header leak.
+
+    For GitHub the convention is `x-access-token:<pat>@github.com/...`;
+    for Bitbucket it's `x-token-auth:<token>@bitbucket.org/...`. Both
+    accept basic-auth over HTTPS for git operations even where the REST
+    API requires Bearer.
     """
     user = urllib.parse.quote(username, safe="")
     pw = urllib.parse.quote(app_password, safe="")
-    return f"https://{user}:{pw}@bitbucket.org/{workspace}/{repo_slug}.git"
+    return f"https://{user}:{pw}@{host}/{workspace}/{repo_slug}.git"
 
 
 def _redact_url(cmd: list[str]) -> list[str]:
@@ -106,16 +111,21 @@ def _du_mb(path: Path) -> int:
 @contextmanager
 def clone_pr_branch(
     *,
+    host: str,
     workspace: str,
     repo_slug: str,
     source_branch: str,
-    bitbucket_username: str,
-    bitbucket_app_password: str,
+    username: str,
+    app_password: str,
     depth: int = 50,
     max_mb: int = 512,
     timeout: float = 180.0,
 ) -> Iterator[ClonedRepo]:
     """Clone the PR's source branch into a tmp dir, yield, then nuke it.
+
+    `host` is the forge hostname — `github.com`, `bitbucket.org`, …. The
+    provider's client surfaces this via the `clone_host` property so the
+    orchestrator stays provider-agnostic.
 
     Raises GitCloneError if the clone fails, is too large, or doesn't
     contain the requested branch.
@@ -125,11 +135,12 @@ def clone_pr_branch(
 
     tmp = Path(tempfile.mkdtemp(prefix="bugbot-clone-", dir="/tmp"))
     try:
-        url = _bitbucket_clone_url(
+        url = _clone_url(
+            host=host,
             workspace=workspace,
             repo_slug=repo_slug,
-            username=bitbucket_username,
-            app_password=bitbucket_app_password,
+            username=username,
+            app_password=app_password,
         )
         cmd = [
             "git", "clone",

@@ -1,21 +1,27 @@
-"""Webhook authentication: HMAC signature + Bitbucket IP allowlist.
+"""Webhook authentication: HMAC signature + per-provider IP allowlists.
 
-Bitbucket Cloud webhooks
-------------------------
-When you set a secret on a webhook, Bitbucket signs the raw body with
-HMAC-SHA256 and sends the digest in `X-Hub-Signature` as `sha256=<hex>`.
-This is the same format GitHub uses.
+HMAC signing
+------------
+Both Bitbucket and GitHub sign the **raw body** with HMAC-SHA256 and send
+the digest as `sha256=<hex>`. Header name differs:
 
-Reference: https://support.atlassian.com/bitbucket-cloud/docs/manage-webhooks/
+  * Bitbucket: `X-Hub-Signature`
+  * GitHub:    `X-Hub-Signature-256`
+
+The verification logic is identical — we expose one helper and let the
+caller pick which header to feed it.
 
 IP allowlist
 ------------
-Atlassian publishes outbound IP ranges at:
-    https://ip-ranges.atlassian.com/
-We cache the list in-process and refresh periodically. If the fetch fails
-we **fail open on first run** (we don't want to brick the service on
-network blips) but **fail closed once we've ever had a successful fetch**
-— meaning once we have a known list, anything outside it is rejected.
+Each provider publishes its webhook source CIDRs:
+
+  * Bitbucket (Atlassian): https://ip-ranges.atlassian.com/  (`items[].cidr`)
+  * GitHub:                https://api.github.com/meta       (`hooks[]`)
+
+We cache in-process per allowlist and refresh on a TTL. **Fail open on the
+very first fetch failure** (we don't want to brick the service on a
+network blip) but **fail closed thereafter** — once we've ever had a
+known list, traffic outside it gets 403.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ import threading
 import time
 from dataclasses import dataclass
 from hashlib import sha256
+from typing import Callable
 
 import httpx
 
@@ -34,10 +41,15 @@ from bugbot.libs.logging import get_logger
 log = get_logger("auth")
 
 _ATLASSIAN_IP_URL = "https://ip-ranges.atlassian.com/"
+_GITHUB_META_URL = "https://api.github.com/meta"
 
 
 def verify_hmac_signature(*, body: bytes, header: str | None, secret: str) -> bool:
-    """Constant-time HMAC-SHA256 check against `sha256=<hex>` header."""
+    """Constant-time HMAC-SHA256 check against `sha256=<hex>` header.
+
+    Works for both Bitbucket (`X-Hub-Signature`) and GitHub
+    (`X-Hub-Signature-256`) — the on-wire format is identical.
+    """
     if not header or not header.startswith("sha256="):
         return False
     provided = header.removeprefix("sha256=").strip()
@@ -51,8 +63,28 @@ class _CacheEntry:
     fetched_at: float
 
 
-class BitbucketIPAllowlist:
-    """Caches Atlassian's published outbound IP ranges."""
+def _parse_bitbucket_cidrs(data: dict) -> list[str]:
+    return [
+        item.get("cidr")
+        for item in data.get("items") or []
+        if item.get("cidr")
+    ]
+
+
+def _parse_github_cidrs(data: dict) -> list[str]:
+    # GitHub's /meta returns `hooks` as a flat list of CIDR strings —
+    # specifically the source IPs webhooks come from. Other keys
+    # (`web`, `api`, `actions`, …) are outbound destinations for *our*
+    # traffic, not theirs, so we don't include them.
+    return list(data.get("hooks") or [])
+
+
+class _IPAllowlistBase:
+    """Shared cache+fetch logic for any JSON-feed-backed allowlist."""
+
+    name: str = "ip-allowlist"
+    url: str = ""
+    _parse: Callable[[dict], list[str]] = staticmethod(lambda _d: [])
 
     def __init__(self, *, refresh_seconds: int = 3600, timeout: float = 10.0) -> None:
         self._refresh = refresh_seconds
@@ -62,12 +94,11 @@ class BitbucketIPAllowlist:
 
     def _fetch(self) -> list[ipaddress._BaseNetwork]:
         with httpx.Client(timeout=self._timeout) as c:
-            resp = c.get(_ATLASSIAN_IP_URL)
+            resp = c.get(self.url)
         resp.raise_for_status()
         data = resp.json()
         nets: list[ipaddress._BaseNetwork] = []
-        for item in data.get("items", []):
-            cidr = item.get("cidr")
+        for cidr in type(self)._parse(data):
             if not cidr:
                 continue
             try:
@@ -75,7 +106,7 @@ class BitbucketIPAllowlist:
             except ValueError:
                 continue
         if not nets:
-            raise RuntimeError("Atlassian IP feed returned no usable CIDRs")
+            raise RuntimeError(f"{self.name} feed returned no usable CIDRs")
         return nets
 
     def _ensure(self) -> list[ipaddress._BaseNetwork] | None:
@@ -87,24 +118,41 @@ class BitbucketIPAllowlist:
             try:
                 nets = self._fetch()
             except Exception as exc:
-                log.warning("could not refresh Atlassian IP allowlist: {}", exc)
-                # Fail-open on first run; fail-closed if we had a list.
+                log.warning("could not refresh {}: {}", self.name, exc)
                 return cache.networks if cache else None
             self._cache = _CacheEntry(networks=nets, fetched_at=now)
-            log.info("refreshed Atlassian IP allowlist ({} CIDRs)", len(nets))
+            log.info("refreshed {} ({} CIDRs)", self.name, len(nets))
             return nets
 
     def is_allowed(self, ip: str) -> bool:
         nets = self._ensure()
         if nets is None:
-            # First call ever and we couldn't fetch. Fail open exactly once.
-            log.warning("IP allowlist unavailable — admitting {} (first-run fail-open)", ip)
+            log.warning(
+                "{} unavailable — admitting {} (first-run fail-open)",
+                self.name, ip,
+            )
             return True
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             return False
         return any(addr in net for net in nets)
+
+
+class BitbucketIPAllowlist(_IPAllowlistBase):
+    """Caches Atlassian's published outbound IP ranges."""
+
+    name = "Atlassian IP allowlist"
+    url = _ATLASSIAN_IP_URL
+    _parse = staticmethod(_parse_bitbucket_cidrs)
+
+
+class GitHubIPAllowlist(_IPAllowlistBase):
+    """Caches GitHub's webhook source IP ranges (`/meta` -> `hooks`)."""
+
+    name = "GitHub IP allowlist"
+    url = _GITHUB_META_URL
+    _parse = staticmethod(_parse_github_cidrs)
 
 
 def client_ip(*, peer: str, forwarded_for: str | None, trust_forwarded: bool) -> str:

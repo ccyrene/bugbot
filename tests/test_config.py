@@ -65,3 +65,59 @@ def test_claude_effort_rejects_unknown_level(monkeypatch):
     monkeypatch.setenv("BUGBOT_CLAUDE_EFFORT", "ludicrous")
     with pytest.raises(Exception):
         Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+# ----------------------------------------------------------------------
+# Provider validation: at least one provider configured, each with its
+# own webhook secret.
+# ----------------------------------------------------------------------
+
+
+def test_no_provider_configured_raises(monkeypatch):
+    # Only the webhook secret is set — neither provider's credential is
+    # present. The server has nothing to do; refuse to start.
+    monkeypatch.setenv("BUGBOT_WEBHOOK_SECRET", "wh")
+    with pytest.raises(Exception):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_github_only_works_without_bitbucket(monkeypatch):
+    # GitHub-only deployment: Bitbucket creds intentionally omitted.
+    monkeypatch.setenv("BUGBOT_GITHUB_TOKEN", "ghp_xxx")
+    monkeypatch.setenv("BUGBOT_GITHUB_WEBHOOK_SECRET", "ghwh")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.github_enabled is True
+    assert s.bitbucket_enabled is False
+
+
+def test_github_token_env_alias_is_accepted(monkeypatch):
+    # Users who already export GITHUB_TOKEN in CI shouldn't have to rename.
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_alias")
+    monkeypatch.setenv("BUGBOT_GITHUB_WEBHOOK_SECRET", "ghwh")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.github_token is not None
+    assert s.github_token.get_secret_value() == "ghp_alias"
+
+
+def test_github_enabled_requires_github_webhook_secret(monkeypatch):
+    # Refuse to start if a webhook would arrive with no shared secret to
+    # verify against — silent acceptance of unsigned hooks is unsafe.
+    monkeypatch.setenv("BUGBOT_GITHUB_TOKEN", "ghp_xxx")
+    with pytest.raises(Exception):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_bitbucket_enabled_requires_bitbucket_webhook_secret(monkeypatch):
+    monkeypatch.setenv("BUGBOT_BITBUCKET_APP_PASSWORD", "ATBB")
+    # No BUGBOT_WEBHOOK_SECRET — config validator should reject.
+    with pytest.raises(Exception):
+        Settings(_env_file=None)  # type: ignore[call-arg]
+
+
+def test_both_providers_simultaneously(monkeypatch):
+    monkeypatch.setenv("BUGBOT_BITBUCKET_APP_PASSWORD", "ATBB")
+    monkeypatch.setenv("BUGBOT_WEBHOOK_SECRET", "bbwh")
+    monkeypatch.setenv("BUGBOT_GITHUB_TOKEN", "ghp_xxx")
+    monkeypatch.setenv("BUGBOT_GITHUB_WEBHOOK_SECRET", "ghwh")
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.bitbucket_enabled and s.github_enabled

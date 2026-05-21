@@ -1,7 +1,7 @@
 from enum import Enum
 from typing import Literal
 
-from pydantic import AliasChoices, Field, SecretStr
+from pydantic import AliasChoices, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ClaudeEffort = Literal["low", "medium", "high", "xhigh", "max"]
@@ -35,6 +35,11 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # Allow kwargs to use the canonical field name even when the field
+        # also has a `validation_alias` (the AliasChoices on bitbucket /
+        # github tokens). Without this, `Settings(github_token=...)` would
+        # be silently dropped because pydantic only checks aliases.
+        populate_by_name=True,
     )
 
     # ---- Claude Code CLI ------------------------------------------------
@@ -58,9 +63,11 @@ class Settings(BaseSettings):
     # an App Password (then this is your Bitbucket username).
     bitbucket_username: str = "x-token-auth"
     # Accept either `BUGBOT_BITBUCKET_APP_PASSWORD` (canonical) or the
-    # shorter `BITBUCKET_TOKEN` for users who already store their PAT under
-    # that name in CI / DO envs.
-    bitbucket_app_password: SecretStr = Field(
+    # shorter `BITBUCKET_TOKEN`. Optional — leave unset for GitHub-only
+    # deployments. The `model_validator` below enforces "at least one
+    # provider configured".
+    bitbucket_app_password: SecretStr | None = Field(
+        default=None,
         validation_alias=AliasChoices(
             "BUGBOT_BITBUCKET_APP_PASSWORD",
             "BITBUCKET_TOKEN",
@@ -68,6 +75,24 @@ class Settings(BaseSettings):
     )
     bitbucket_base_url: str = "https://api.bitbucket.org/2.0"
     bitbucket_timeout_seconds: float = 60.0
+
+    # ---- GitHub ---------------------------------------------------------
+    # Fine-grained or classic PAT. Required permissions on a fine-grained
+    # PAT: Contents: Read, Pull requests: Read & Write. Optional — leave
+    # unset for Bitbucket-only deployments.
+    github_token: SecretStr | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "BUGBOT_GITHUB_TOKEN",
+            "GITHUB_TOKEN",
+        ),
+    )
+    # Separate webhook secret for GitHub — never share a secret between
+    # providers. Optional only because GitHub is optional.
+    github_webhook_secret: SecretStr | None = None
+    github_base_url: str = "https://api.github.com"
+    github_timeout_seconds: float = 60.0
+    github_webhook_path: str = "/webhook/github"
 
     # ---- git clone ------------------------------------------------------
     git_clone_depth: int = Field(default=50, ge=1)
@@ -79,8 +104,9 @@ class Settings(BaseSettings):
     server_port: int = 8080
     webhook_path: str = "/webhook/bitbucket"
     # Shared secret you configure when creating the Bitbucket webhook.
-    # Required: we reject any unsigned/invalid request.
-    webhook_secret: SecretStr
+    # Required iff Bitbucket is enabled (paired with bitbucket_app_password);
+    # see the model_validator below.
+    webhook_secret: SecretStr | None = None
     # If true, validate the source IP against Atlassian's published ranges.
     webhook_enforce_ip_allowlist: bool = True
     # Refresh the IP ranges cache every N seconds.
@@ -117,6 +143,36 @@ class Settings(BaseSettings):
     @property
     def claude_allowed_tools_list(self) -> list[str]:
         return [t.strip() for t in self.claude_allowed_tools.split(",") if t.strip()]
+
+    @property
+    def bitbucket_enabled(self) -> bool:
+        return self.bitbucket_app_password is not None
+
+    @property
+    def github_enabled(self) -> bool:
+        return self.github_token is not None
+
+    @model_validator(mode="after")
+    def _validate_providers(self) -> "Settings":
+        # At least one provider must be configured — otherwise the server
+        # has nothing to do.
+        if not self.bitbucket_enabled and not self.github_enabled:
+            raise ValueError(
+                "No PR provider configured. Set BUGBOT_BITBUCKET_APP_PASSWORD "
+                "(or BITBUCKET_TOKEN) and/or BUGBOT_GITHUB_TOKEN."
+            )
+        # Each enabled provider needs its own webhook secret. We refuse to
+        # share secrets across providers — leaking one shouldn't grant
+        # access to the other's pipeline.
+        if self.bitbucket_enabled and self.webhook_secret is None:
+            raise ValueError(
+                "BUGBOT_WEBHOOK_SECRET is required when Bitbucket is enabled."
+            )
+        if self.github_enabled and self.github_webhook_secret is None:
+            raise ValueError(
+                "BUGBOT_GITHUB_WEBHOOK_SECRET is required when GitHub is enabled."
+            )
+        return self
 
 
 def load_settings() -> Settings:

@@ -17,6 +17,7 @@ Payload reference:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 TRIGGER_EVENTS = frozenset({
@@ -35,6 +36,9 @@ KNOWN_EVENTS = TRIGGER_EVENTS | frozenset({
 })
 
 
+Provider = Literal["bitbucket", "github"]
+
+
 @dataclass(frozen=True)
 class WebhookEvent:
     event_key: str
@@ -43,6 +47,7 @@ class WebhookEvent:
     pr_id: int
     actor: str
     is_trigger: bool
+    provider: Provider = "bitbucket"
 
     @property
     def should_review(self) -> bool:
@@ -81,4 +86,5 @@ def parse_webhook(*, event_key: str | None, payload: dict) -> WebhookEvent:
         pr_id=pr_id,
         actor=actor,
         is_trigger=event_key in TRIGGER_EVENTS,
+        provider="bitbucket",
     )

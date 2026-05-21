@@ -18,8 +18,10 @@ from typing import Optional
 import typer
 
 from bugbot import __version__ as _pkg_version
+from bugbot.clients._provider import PullRequestProvider
 from bugbot.clients.bitbucket import BitbucketClient
 from bugbot.clients.claude_cli import ClaudeCliClient
+from bugbot.clients.github import GitHubClient
 from bugbot.config import Severity, load_settings
 from bugbot.libs.logging import configure_logging, get_logger
 from bugbot.services.diff import parse_unified_diff
@@ -27,7 +29,7 @@ from bugbot.services.review import Reviewer, result_to_json
 from bugbot.services.security import scan_diff
 
 app = typer.Typer(add_completion=False, no_args_is_help=True,
-                  help="bugbot — Bitbucket AI PR reviewer (Claude CLI backed)")
+                  help="bugbot — Bitbucket/GitHub AI PR reviewer (Claude CLI backed)")
 log = get_logger("cli")
 
 
@@ -61,9 +63,13 @@ def serve(
 
 @app.command("review-pr")
 def review_pr(
-    workspace: str = typer.Argument(..., help="Bitbucket workspace slug."),
-    repo_slug: str = typer.Argument(..., help="Bitbucket repository slug."),
+    workspace: str = typer.Argument(..., help="Workspace (Bitbucket) or owner (GitHub)."),
+    repo_slug: str = typer.Argument(..., help="Repository slug."),
     pr_id: int = typer.Argument(..., help="Pull request id."),
+    provider: str = typer.Option(
+        "bitbucket", "--provider", "-P",
+        help="Which provider to review against: bitbucket or github.",
+    ),
     artifact: Optional[Path] = typer.Option(
         None, "--artifact", help="If set, write the review JSON to this file."
     ),
@@ -71,23 +77,49 @@ def review_pr(
     """Run a one-off review (debug / manual re-review)."""
     settings = load_settings()
     configure_logging(settings.log_level)
-    log.info("manual review: {}/{}#{}", workspace, repo_slug, pr_id)
+    log.info("manual review: {}:{}/{}#{}", provider, workspace, repo_slug, pr_id)
 
-    bb = BitbucketClient(
-        username=settings.bitbucket_username,
-        app_password=settings.bitbucket_app_password.get_secret_value(),
-        workspace=workspace,
-        repo_slug=repo_slug,
-        base_url=settings.bitbucket_base_url,
-        timeout=settings.bitbucket_timeout_seconds,
-    )
+    provider_norm = provider.strip().lower()
+    if provider_norm not in {"bitbucket", "github"}:
+        raise typer.BadParameter(
+            f"--provider must be 'bitbucket' or 'github', got {provider!r}"
+        )
+
+    client: PullRequestProvider
+    if provider_norm == "bitbucket":
+        if settings.bitbucket_app_password is None:
+            raise typer.BadParameter(
+                "Bitbucket is not configured — set BUGBOT_BITBUCKET_APP_PASSWORD "
+                "(or BITBUCKET_TOKEN)."
+            )
+        client = BitbucketClient(
+            username=settings.bitbucket_username,
+            app_password=settings.bitbucket_app_password.get_secret_value(),
+            workspace=workspace,
+            repo_slug=repo_slug,
+            base_url=settings.bitbucket_base_url,
+            timeout=settings.bitbucket_timeout_seconds,
+        )
+    else:
+        if settings.github_token is None:
+            raise typer.BadParameter(
+                "GitHub is not configured — set BUGBOT_GITHUB_TOKEN."
+            )
+        client = GitHubClient(
+            token=settings.github_token.get_secret_value(),
+            owner=workspace,
+            repo=repo_slug,
+            base_url=settings.github_base_url,
+            timeout=settings.github_timeout_seconds,
+        )
+
     claude = ClaudeCliClient(
         cli_path=settings.claude_cli_path,
         model=settings.claude_model,
         timeout=settings.claude_timeout_seconds,
     )
-    with bb, claude:
-        result = Reviewer(settings, bitbucket=bb, claude=claude).run(pr_id)
+    with client, claude:  # type: ignore[arg-type]
+        result = Reviewer(settings, provider=client, claude=claude).run(pr_id)
 
     payload = result_to_json(result)
     if artifact:

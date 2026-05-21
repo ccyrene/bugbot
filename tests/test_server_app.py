@@ -17,18 +17,24 @@ from bugbot.server.app import create_app
 
 
 SECRET = "topsecret"
+GH_SECRET = "ghsecret"
 
 
-def _settings() -> Settings:
+def _settings(*, github: bool = False) -> Settings:
     # Minimal valid settings for the server; webhook secret is what we care
-    # about. IP allowlist disabled so we don't need to mock the Atlassian
-    # IP feed.
-    return Settings(
+    # about. IP allowlist disabled so we don't need to mock the upstream
+    # IP feeds.
+    kwargs: dict = dict(
         bitbucket_username="u",
         bitbucket_app_password=SecretStr("p"),
         webhook_secret=SecretStr(SECRET),
         webhook_enforce_ip_allowlist=False,
     )
+    if github:
+        kwargs["github_token"] = SecretStr("ghp_xxx")
+        kwargs["github_webhook_secret"] = SecretStr(GH_SECRET)
+    # `_env_file=None` keeps the on-disk dev .env from leaking into tests.
+    return Settings(_env_file=None, **kwargs)  # type: ignore[call-arg]
 
 
 def _sign(body: bytes, secret: str = SECRET) -> str:
@@ -43,6 +49,15 @@ def _payload(pr_id: int = 7) -> bytes:
     }).encode("utf-8")
 
 
+def _github_payload(action: str = "opened", number: int = 7) -> bytes:
+    return json.dumps({
+        "action": action,
+        "repository": {"full_name": "acme/widget"},
+        "pull_request": {"number": number, "title": "t", "draft": False},
+        "sender": {"login": "alice"},
+    }).encode("utf-8")
+
+
 @pytest.fixture
 def client():
     app = create_app(_settings())
@@ -53,10 +68,28 @@ def client():
         yield c
 
 
+@pytest.fixture
+def client_both():
+    """Server with both Bitbucket and GitHub configured."""
+    app = create_app(_settings(github=True))
+    submitted: list[Any] = []
+    app.state.worker.submit = lambda job: submitted.append(job) or True  # type: ignore
+    with TestClient(app) as c:
+        c.submitted = submitted  # type: ignore[attr-defined]
+        yield c
+
+
+def _sign_gh(body: bytes, secret: str = GH_SECRET) -> str:
+    return "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+
 def test_healthz(client):
     r = client.get("/healthz")
     assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
+    body = r.json()
+    assert body["status"] == "ok"
+    # Bitbucket-only fixture: providers map reflects what's actually wired.
+    assert body["providers"] == {"bitbucket": True, "github": False}
 
 
 def test_webhook_rejects_missing_signature(client):
@@ -166,3 +199,114 @@ def test_webhook_dedupes_same_pr(client):
         content=body,
     ).json()["status"] for _ in range(0)]  # already-asserted above
     _ = statuses
+
+
+# ----------------------------------------------------------------------
+# GitHub endpoint
+# ----------------------------------------------------------------------
+
+
+def test_github_webhook_503_when_not_configured(client):
+    """Bitbucket-only deployment: hitting /webhook/github returns 503 so
+    operators notice the misconfiguration instead of getting silent 401s."""
+    body = _github_payload()
+    r = client.post(
+        "/webhook/github",
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": _sign_gh(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 503
+
+
+def test_github_webhook_rejects_bad_signature(client_both):
+    body = _github_payload()
+    r = client_both.post(
+        "/webhook/github",
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": _sign_gh(body, "wrong"),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 401
+
+
+def test_github_webhook_uses_separate_secret_from_bitbucket(client_both):
+    """Cross-secret check: signing a GitHub body with the Bitbucket secret
+    must NOT authorise it. Each provider has its own HMAC key."""
+    body = _github_payload()
+    r = client_both.post(
+        "/webhook/github",
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": _sign_gh(body, SECRET),  # wrong secret
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 401
+
+
+def test_github_webhook_accepts_valid_pr_opened(client_both):
+    body = _github_payload(action="opened", number=99)
+    r = client_both.post(
+        "/webhook/github",
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": _sign_gh(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 202
+    assert r.json()["status"] == "accepted"
+    job = client_both.submitted[0]  # type: ignore[attr-defined]
+    assert job.provider == "github"
+    assert job.workspace == "acme"
+    assert job.repo_slug == "widget"
+    assert job.pr_id == 99
+
+
+def test_github_webhook_handles_ping_event(client_both):
+    """When you save the webhook config GitHub fires a `ping` — we must
+    not 401 it (the body isn't a pull_request payload) and not enqueue
+    anything either."""
+    body = b'{"zen":"Practicality beats purity."}'
+    r = client_both.post(
+        "/webhook/github",
+        headers={
+            "X-GitHub-Event": "ping",
+            "X-Hub-Signature-256": _sign_gh(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 204
+    assert client_both.submitted == []  # type: ignore[attr-defined]
+
+
+def test_github_webhook_ignores_non_trigger_action(client_both):
+    body = _github_payload(action="labeled")
+    r = client_both.post(
+        "/webhook/github",
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": _sign_gh(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 204
+    assert client_both.submitted == []  # type: ignore[attr-defined]
+
+
+def test_healthz_reports_enabled_providers(client_both):
+    r = client_both.get("/healthz")
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["providers"] == {"bitbucket": True, "github": True}

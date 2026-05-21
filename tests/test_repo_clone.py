@@ -7,10 +7,25 @@ import pytest
 
 from bugbot.services.repo import (
     GitCloneError,
-    _bitbucket_clone_url,
+    _clone_url,
     _redact_url,
     clone_pr_branch,
 )
+
+
+def _clone(**overrides):
+    """Defaults for `clone_pr_branch` so individual tests can override
+    just the parts they care about."""
+    kwargs = dict(
+        host="bitbucket.org",
+        workspace="ws",
+        repo_slug="r",
+        source_branch="feature",
+        username="u",
+        app_password="p",
+    )
+    kwargs.update(overrides)
+    return clone_pr_branch(**kwargs)
 
 
 def _completed(stdout: str = "", stderr: str = "", returncode: int = 0):
@@ -20,7 +35,8 @@ def _completed(stdout: str = "", stderr: str = "", returncode: int = 0):
 
 
 def test_clone_url_encodes_special_chars():
-    url = _bitbucket_clone_url(
+    url = _clone_url(
+        host="bitbucket.org",
         workspace="ws", repo_slug="r",
         username="user@example.com",
         app_password="p/w:special",
@@ -30,6 +46,16 @@ def test_clone_url_encodes_special_chars():
     # / and : in password must be encoded too.
     assert "p%2Fw%3Aspecial" in url
     assert url.endswith("bitbucket.org/ws/r.git")
+
+
+def test_clone_url_supports_github_host():
+    url = _clone_url(
+        host="github.com",
+        workspace="acme", repo_slug="thing",
+        username="x-access-token",
+        app_password="github_pat_xxx",
+    )
+    assert url == "https://x-access-token:github_pat_xxx@github.com/acme/thing.git"
 
 
 def test_redact_url_strips_basic_auth_from_cmd():
@@ -56,10 +82,7 @@ def test_clone_pr_branch_cleans_up_tmpdir_on_success(tmp_path, monkeypatch):
     monkeypatch.setattr("bugbot.services.repo.shutil.which", lambda _x: "/usr/bin/git")
     monkeypatch.setattr("bugbot.services.repo.subprocess.run", fake_run)
 
-    with clone_pr_branch(
-        workspace="ws", repo_slug="r", source_branch="feature",
-        bitbucket_username="u", bitbucket_app_password="p",
-    ) as clone:
+    with _clone() as clone:
         assert clone.head_commit == "deadbeef"
         assert clone.path.exists()
 
@@ -71,10 +94,7 @@ def test_clone_pr_branch_cleans_up_tmpdir_on_success(tmp_path, monkeypatch):
 def test_clone_pr_branch_raises_when_git_missing(monkeypatch):
     monkeypatch.setattr("bugbot.services.repo.shutil.which", lambda _x: None)
     with pytest.raises(GitCloneError):
-        with clone_pr_branch(
-            workspace="ws", repo_slug="r", source_branch="b",
-            bitbucket_username="u", bitbucket_app_password="p",
-        ):
+        with _clone():
             pass
 
 
@@ -90,10 +110,7 @@ def test_clone_pr_branch_raises_on_nonzero_exit_and_redacts(monkeypatch):
     monkeypatch.setattr("bugbot.services.repo.subprocess.run", boom)
 
     with pytest.raises(GitCloneError) as ei:
-        with clone_pr_branch(
-            workspace="ws", repo_slug="r", source_branch="b",
-            bitbucket_username="u", bitbucket_app_password="supersecret",
-        ):
+        with _clone(app_password="supersecret"):
             pass
     msg = str(ei.value)
     assert "supersecret" not in msg
@@ -109,11 +126,7 @@ def test_clone_pr_branch_raises_on_timeout(monkeypatch):
     monkeypatch.setattr("bugbot.services.repo.subprocess.run", slow)
 
     with pytest.raises(GitCloneError) as ei:
-        with clone_pr_branch(
-            workspace="ws", repo_slug="r", source_branch="b",
-            bitbucket_username="u", bitbucket_app_password="p",
-            timeout=1,
-        ):
+        with _clone(timeout=1):
             pass
     assert "timed out" in str(ei.value)
 
@@ -133,11 +146,7 @@ def test_clone_pr_branch_rejects_oversized_clone(monkeypatch, tmp_path):
     monkeypatch.setattr("bugbot.services.repo.subprocess.run", fake_run)
 
     with pytest.raises(GitCloneError) as ei:
-        with clone_pr_branch(
-            workspace="ws", repo_slug="r", source_branch="b",
-            bitbucket_username="u", bitbucket_app_password="p",
-            max_mb=1,  # 1 MB cap → 2 MB clone fails.
-        ):
+        with _clone(max_mb=1):  # 1 MB cap → 2 MB clone fails.
             pass
     assert "too large" in str(ei.value)
 
@@ -155,10 +164,7 @@ def test_clone_pr_branch_sets_credential_blocking_env(monkeypatch):
 
     monkeypatch.setattr("bugbot.services.repo.subprocess.run", fake_run)
 
-    with clone_pr_branch(
-        workspace="ws", repo_slug="r", source_branch="b",
-        bitbucket_username="u", bitbucket_app_password="p",
-    ):
+    with _clone():
         pass
 
     # Critical hardening: no interactive password prompts allowed.
