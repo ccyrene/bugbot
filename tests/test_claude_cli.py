@@ -143,3 +143,31 @@ def test_chat_raises_on_timeout(fake_which):
         with pytest.raises(ClaudeCliError) as ei:
             ClaudeCliClient(timeout=1).chat(system_prompt="s", user_prompt="u")
     assert "timed out" in str(ei.value)
+
+
+def test_chat_captures_all_four_token_counters(fake_which):
+    """The CLI's `usage` envelope reports four counters: input,
+    cache_creation_input, cache_read_input, output. The adapter must
+    surface all four — `cache_read` is the largest by far for the
+    typical bugbot run (system prompt + tool defs replayed from cache)
+    and dropping it under-reports cost by ~90%."""
+    envelope = {
+        "type": "result", "subtype": "success",
+        "result": '{"summary": "ok", "findings": []}',
+        "is_error": False,
+        "usage": {
+            "input_tokens": 5,
+            "cache_creation_input_tokens": 312,
+            "cache_read_input_tokens": 4827,
+            "output_tokens": 173,
+        },
+    }
+    with patch("bugbot.clients.claude_cli.subprocess.run",
+               return_value=_make_completed(stdout=json.dumps(envelope))):
+        resp = ClaudeCliClient().chat(system_prompt="s", user_prompt="u")
+    assert resp.prompt_tokens == 5
+    assert resp.cache_creation_tokens == 312
+    assert resp.cache_read_tokens == 4827
+    assert resp.completion_tokens == 173
+    # Total spans every counter the API charged for.
+    assert resp.total_tokens == 5 + 312 + 4827 + 173

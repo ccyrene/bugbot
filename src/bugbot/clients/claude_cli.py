@@ -41,7 +41,13 @@ class ClaudeCliError(RuntimeError):
 @dataclass
 class ClaudeResponse:
     content: str
+    # `prompt_tokens` is the *non-cached* input — i.e. the small delta
+    # the model actually processed fresh this call. The bulk of input
+    # for a typical bugbot run lives in `cache_read_tokens` (system
+    # prompt + tool defs + repeated instructions, replayed from cache).
     prompt_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
 
@@ -181,13 +187,23 @@ class ClaudeCliClient:
             content = (envelope.get("result") or envelope.get("text") or "").strip()
 
         usage = (envelope or {}).get("usage") or {}
+        # The CLI surfaces all four counters from the Anthropic API:
+        #   - input_tokens               = fresh non-cached input
+        #   - cache_creation_input_tokens = input written to prompt cache
+        #   - cache_read_input_tokens     = input served from cache (free-ish)
+        #   - output_tokens               = model output (incl. tool-use)
+        # Totalling all four gives the "real" tokens charged for the call.
+        input_t = int(usage.get("input_tokens") or 0)
+        cache_create_t = int(usage.get("cache_creation_input_tokens") or 0)
+        cache_read_t = int(usage.get("cache_read_input_tokens") or 0)
+        output_t = int(usage.get("output_tokens") or 0)
         return ClaudeResponse(
             content=content,
-            prompt_tokens=int(usage.get("input_tokens") or 0),
-            completion_tokens=int(usage.get("output_tokens") or 0),
-            total_tokens=int(
-                (usage.get("input_tokens") or 0) + (usage.get("output_tokens") or 0)
-            ),
+            prompt_tokens=input_t,
+            cache_creation_tokens=cache_create_t,
+            cache_read_tokens=cache_read_t,
+            completion_tokens=output_t,
+            total_tokens=input_t + cache_create_t + cache_read_t + output_t,
         )
 
     def close(self) -> None:

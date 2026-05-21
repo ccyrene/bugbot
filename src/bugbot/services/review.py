@@ -57,10 +57,21 @@ class ReviewResult:
     summary: str = ""
     findings: list[Finding] = field(default_factory=list)
     prompt_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
     completion_tokens: int = 0
     dry_run: bool = False
     posted_inline: int = 0
     posted_summary: bool = False
+
+    @property
+    def total_tokens(self) -> int:
+        return (
+            self.prompt_tokens
+            + self.cache_creation_tokens
+            + self.cache_read_tokens
+            + self.completion_tokens
+        )
 
     @property
     def top_severity(self) -> Severity:
@@ -609,6 +620,8 @@ class Reviewer:
 
         # ------- after clone is cleaned up, parse + post -----------------
         result.prompt_tokens = chat.prompt_tokens
+        result.cache_creation_tokens = chat.cache_creation_tokens
+        result.cache_read_tokens = chat.cache_read_tokens
         result.completion_tokens = chat.completion_tokens
 
         try:
@@ -628,10 +641,19 @@ class Reviewer:
         result.findings = _dedupe(result.findings)
 
         self._post(result)
+        # Token breakdown: input | cache_create | cache_read | output | total.
+        # Cache-read is usually the largest counter (system prompt + tool
+        # defs replayed from cache); surfacing it makes the cost
+        # comprehensible at a glance.
         log.info(
-            "review done — findings={} top={} tokens={}+{}",
+            "review done — findings={} top={} tokens "
+            "input={} cache_create={} cache_read={} output={} total={}",
             len(result.findings), result.top_severity.value,
-            result.prompt_tokens, result.completion_tokens,
+            result.prompt_tokens,
+            result.cache_creation_tokens,
+            result.cache_read_tokens,
+            result.completion_tokens,
+            result.total_tokens,
         )
         return result
 
@@ -708,7 +730,10 @@ def result_to_json(result: ReviewResult) -> str:
         "summary": result.summary,
         "top_severity": result.top_severity.value,
         "prompt_tokens": result.prompt_tokens,
+        "cache_creation_tokens": result.cache_creation_tokens,
+        "cache_read_tokens": result.cache_read_tokens,
         "completion_tokens": result.completion_tokens,
+        "total_tokens": result.total_tokens,
         "posted_inline": result.posted_inline,
         "posted_summary": result.posted_summary,
         "findings": [
