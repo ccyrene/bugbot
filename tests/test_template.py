@@ -108,3 +108,57 @@ def test_marker_substring_findable_for_idempotency():
     the bare substring, not be wrapped in something that breaks it."""
     body = _format_inline_body(_finding(), "Claude Sonnet", "bugbot:v1")
     assert "bugbot:v1" in body
+
+
+# ----------------------------------------------------------------------
+# Provider-specific suggestion blocks
+# ----------------------------------------------------------------------
+
+
+def _finding_with_suggestion() -> Finding:
+    return Finding(
+        file="api/users.py",
+        line=42,
+        severity=Severity.HIGH,
+        category="correctness",
+        message="Missing await on async fetch.",
+        suggestion="result = await fetch()",
+    )
+
+
+def test_github_inline_body_uses_suggestion_fence():
+    """On GitHub the suggestion must be in a ```suggestion fence so the
+    PR author gets the one-click "Commit suggestion" button. Anything
+    else (plain ``` or ```python) does NOT trigger that UI affordance."""
+    body = _format_inline_body(
+        _finding_with_suggestion(), "Claude Sonnet", "bugbot:v1",
+        provider_kind="github",
+    )
+    assert "```suggestion" in body
+    assert "result = await fetch()" in body
+    # The replacement closes the fence cleanly — no straggling backticks.
+    assert body.count("```") == 2  # opening + closing
+
+
+def test_bitbucket_inline_body_uses_plain_fence_with_label():
+    """Bitbucket Cloud has no native suggestion concept. Render the same
+    content in a plain code fence with a label so the reader knows it's
+    a *proposed* replacement, not just an inline code sample."""
+    body = _format_inline_body(
+        _finding_with_suggestion(), "Claude Sonnet", "bugbot:v1",
+        provider_kind="bitbucket",
+    )
+    assert "```suggestion" not in body
+    assert "_Suggested fix:_" in body
+    assert "result = await fetch()" in body
+
+
+def test_inline_body_omits_suggestion_block_when_no_suggestion():
+    """A finding without a `suggestion` field should render exactly like
+    pre-suggestion bugbot — no empty fence, no stray label."""
+    body = _format_inline_body(
+        _finding(), "Claude Sonnet", "bugbot:v1", provider_kind="github",
+    )
+    assert "```suggestion" not in body
+    assert "_Suggested fix:_" not in body
+    assert "```" not in body  # no fence of any kind

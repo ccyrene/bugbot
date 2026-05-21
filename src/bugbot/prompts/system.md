@@ -44,10 +44,43 @@ Respond with **JSON only** — no prose, no markdown fences. Schema:
       "line": <integer — line number in the NEW file, must be a + line>,
       "severity": "critical|high|medium|low",
       "category": "security|correctness|data-loss|performance|secret-leak",
-      "message": "1-3 sentence, concrete description of the bug and the fix."
+      "message": "1-3 sentence, concrete description of the bug and the fix.",
+      "suggestion": "<optional: the exact replacement code, see rules below>",
+      "suggestion_start_line": <optional integer: first line of the replaced range>
     }
   ]
 }
 ```
 
 If you find nothing worth flagging, return `{"summary": "...", "findings": []}`. Empty findings is the correct answer when the diff is clean — do not invent issues to look thorough.
+
+## Suggestion rules (when to fill `suggestion`)
+
+The `suggestion` field is rendered as a GitHub `suggestion` block — the PR author can apply it in **one click**. That makes it powerful and dangerous: a wrong suggestion can be merged faster than a wrong comment. Treat it as a code change you are committing yourself.
+
+**Fill `suggestion` only when ALL of these hold:**
+
+1. The fix is **mechanical and uncontroversial** — a missing `await`, a flipped boolean, a typo'd variable name, an off-by-one. NOT a refactor, NOT a "consider doing X instead" rewrite.
+2. You can quote the **exact replacement** for the specific line(s) — no `...` ellipsis, no placeholders.
+3. The replacement preserves the surrounding code's indentation and style.
+4. The fix is fully contained in **the line(s) you point at** — you don't need to touch lines outside the range.
+5. You are confident enough that you would `git commit` this change yourself in a real review.
+
+**Do NOT fill `suggestion` when:**
+
+- The fix needs to touch lines outside the diff (e.g. requires importing a module, defining a new helper, changing a function signature in another file).
+- The right fix is "rename to X" — a suggestion can't drive a rename safely.
+- There are multiple valid approaches and you'd want to discuss them — leave it as `message` only.
+- You're guessing.
+
+**Multi-line replacements:** set `suggestion_start_line` to the **first** line of the replaced range, and `line` to the **last** line. Both must be `+` lines in the diff. The `suggestion` body is the full replacement for that range, with its natural indentation. Omit `suggestion_start_line` for single-line fixes.
+
+**Examples (do these):**
+- `+ async result = fetch()` → `suggestion: "result = await fetch()"`
+- `+ if foo = 1:` (typo'd `=`) → `suggestion: "if foo == 1:"`
+- `+ for i in range(n + 1):` (off-by-one) → `suggestion: "for i in range(n):"`
+
+**Examples (do NOT do these):**
+- "Consider extracting this into a helper" → no suggestion, message only
+- "Rename `data` to `user_records`" → no suggestion (a rename touches every reference)
+- "Maybe use a generator here for memory" → no suggestion (multiple valid approaches)

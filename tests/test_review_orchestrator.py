@@ -8,6 +8,7 @@ from bugbot.services.review import (
     _dedupe,
     _filter_findings_to_diff,
     _format_security_block,
+    _llm_findings_to_model,
     _load_focus,
     _load_prompt,
     _parse_llm_json,
@@ -156,6 +157,88 @@ def test_unknown_domain_falls_back_to_general():
     fallback = _load_focus("does-not-exist")
     general = _load_focus("general")
     assert fallback == general
+
+
+# ----------------------------------------------------------------------
+# Suggestion field parsing
+# ----------------------------------------------------------------------
+
+
+def test_llm_finding_with_suggestion_parses_through():
+    payload = {
+        "summary": "ok",
+        "findings": [{
+            "file": "app.py", "line": 3, "severity": "high",
+            "category": "correctness", "message": "use ==",
+            "suggestion": "if foo == 1:",
+        }],
+    }
+    _, findings = _llm_findings_to_model(payload)
+    assert len(findings) == 1
+    assert findings[0].suggestion == "if foo == 1:"
+    assert findings[0].suggestion_start_line is None
+
+
+def test_llm_finding_with_empty_suggestion_treated_as_none():
+    # The model sometimes emits `""` instead of omitting the field. Treat
+    # that as "no suggestion" so we don't render an empty code fence.
+    payload = {
+        "summary": "ok",
+        "findings": [{
+            "file": "app.py", "line": 3, "severity": "high",
+            "category": "correctness", "message": "m",
+            "suggestion": "   ",
+        }],
+    }
+    _, findings = _llm_findings_to_model(payload)
+    assert findings[0].suggestion is None
+
+
+def test_llm_finding_with_multiline_suggestion_keeps_start_line():
+    payload = {
+        "summary": "ok",
+        "findings": [{
+            "file": "app.py", "line": 5, "severity": "medium",
+            "category": "correctness", "message": "m",
+            "suggestion": "for i in range(n):\n    x += i",
+            "suggestion_start_line": 4,
+        }],
+    }
+    _, findings = _llm_findings_to_model(payload)
+    assert findings[0].suggestion_start_line == 4
+    assert "\n" in findings[0].suggestion
+
+
+def test_llm_finding_drops_start_line_greater_than_line():
+    # `suggestion_start_line` must be <= `line` for GitHub's range API.
+    # Reverse order means model is confused — keep finding, drop range.
+    payload = {
+        "summary": "ok",
+        "findings": [{
+            "file": "app.py", "line": 3, "severity": "low",
+            "category": "correctness", "message": "m",
+            "suggestion": "foo",
+            "suggestion_start_line": 9,
+        }],
+    }
+    _, findings = _llm_findings_to_model(payload)
+    assert findings[0].suggestion == "foo"
+    assert findings[0].suggestion_start_line is None
+
+
+def test_filter_drops_suggestion_when_start_line_not_in_diff():
+    files = parse_unified_diff(DIFF)
+    valid = _valid_lines_per_file(files)
+    f = Finding(
+        file="app.py", line=4, severity=Severity.LOW,
+        category="correctness", message="m",
+        suggestion="z = 99", suggestion_start_line=1,  # line 1 is context, not +
+    )
+    out = _filter_findings_to_diff([f], valid)
+    assert len(out) == 1
+    # Finding survives, just without the suggestion attached.
+    assert out[0].suggestion is None
+    assert out[0].suggestion_start_line is None
 
 
 def test_system_template_substitutes_focus_block_into_full_prompt():

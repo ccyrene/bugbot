@@ -217,7 +217,7 @@ class GitHubClient:
             raise GitHubError(
                 "post_inline_comment requires comment.commit_id (PR head sha)"
             )
-        payload = {
+        payload: dict[str, Any] = {
             "body": comment.body,
             "commit_id": comment.commit_id,
             "path": comment.file,
@@ -226,6 +226,14 @@ class GitHubClient:
             # line number matches the `+` lines our reviewer reports.
             "side": "RIGHT",
         }
+        # Multi-line range (used to anchor multi-line ```suggestion blocks).
+        # GitHub requires BOTH start_line and start_side when the comment
+        # spans a range; the API 422s if either is missing. We only set
+        # them when the caller passed a start_line that differs from
+        # `line` — same-line means single-line comment.
+        if comment.start_line is not None and comment.start_line < comment.line:
+            payload["start_line"] = comment.start_line
+            payload["start_side"] = "RIGHT"
         resp = self._client.post(
             self._repo_path(f"/pulls/{pr_id}/comments"),
             json=payload,

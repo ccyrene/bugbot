@@ -36,6 +36,11 @@ class InlineComment(BaseModel):
     # populates it from `PullRequest.source_commit`. Bitbucket's client
     # ignores it.
     commit_id: str | None = None
+    # Multi-line suggestion support (GitHub). When set and `start_line !=
+    # line`, the GitHub client sends `start_line` + `start_side` so the
+    # suggestion block replaces the [start_line, line] range. Bitbucket's
+    # client ignores it (Bitbucket has no native suggestion concept).
+    start_line: int | None = None
 
 
 class ExistingComment(BaseModel):

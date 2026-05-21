@@ -136,6 +136,66 @@ def test_post_inline_comment_payload_shape():
     # side=RIGHT anchors on the post-change line, matching the `+` line
     # numbers our reviewer emits.
     assert payload["side"] == "RIGHT"
+    # Single-line comment must NOT include start_line / start_side — if
+    # we sent them with start_line == line, GitHub responds 422.
+    assert "start_line" not in payload
+    assert "start_side" not in payload
+
+
+@respx.mock
+def test_post_inline_comment_multiline_suggestion_includes_range():
+    """Multi-line ```suggestion blocks require GitHub's range fields:
+    start_line + start_side. Without both, the API rejects with 422."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        captured["json"] = _json.loads(request.content)
+        return httpx.Response(201, json={"id": 1})
+
+    respx.post(
+        "https://api.github.com/repos/acme/thing/pulls/42/comments"
+    ).mock(side_effect=handler)
+
+    _client().post_inline_comment(
+        42,
+        InlineComment(
+            file="src/app.py", line=14, start_line=12,
+            body="hi", commit_id="sha-head",
+        ),
+    )
+    payload = captured["json"]
+    assert payload["line"] == 14
+    assert payload["start_line"] == 12
+    assert payload["start_side"] == "RIGHT"
+
+
+@respx.mock
+def test_post_inline_comment_ignores_start_line_equal_to_line():
+    """start_line == line is a single-line comment. Sending the range
+    fields anyway would be a no-op at best and a 422 at worst — make
+    sure the client treats them as absent."""
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+        captured["json"] = _json.loads(request.content)
+        return httpx.Response(201, json={"id": 1})
+
+    respx.post(
+        "https://api.github.com/repos/acme/thing/pulls/42/comments"
+    ).mock(side_effect=handler)
+
+    _client().post_inline_comment(
+        42,
+        InlineComment(
+            file="x.py", line=5, start_line=5,
+            body="b", commit_id="sha",
+        ),
+    )
+    payload = captured["json"]
+    assert "start_line" not in payload
+    assert "start_side" not in payload
 
 
 @respx.mock

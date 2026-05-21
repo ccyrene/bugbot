@@ -42,6 +42,13 @@ class Finding:
     category: _Category
     message: str
     source: Literal["scanner", "llm"] = "llm"
+    # Optional one-click fix. The LLM may emit a `suggestion` (replacement
+    # code) when it's confident the fix is mechanical; the formatter then
+    # renders a GitHub ```suggestion block (apply-in-one-click) or a
+    # plain code fence on Bitbucket (no native suggestion support, just
+    # visible before/after).
+    suggestion: str | None = None
+    suggestion_start_line: int | None = None
 
 
 @dataclass
@@ -209,13 +216,43 @@ def _llm_findings_to_model(payload: dict) -> tuple[str, list[Finding]]:
     for raw in payload.get("findings") or []:
         try:
             sev = Severity(str(raw["severity"]).lower())
+            line = int(raw["line"])
+
+            # Optional fix-up code from the model. We keep it as the literal
+            # string the model produced — the formatter handles the per-
+            # provider wrapping. None/empty string means "no suggestion".
+            suggestion_raw = raw.get("suggestion")
+            suggestion: str | None = None
+            if suggestion_raw is not None and str(suggestion_raw).strip():
+                suggestion = str(suggestion_raw)
+
+            # `suggestion_start_line` is optional; only meaningful for
+            # multi-line replacements. Must be <= `line` to be a valid
+            # GitHub range (start_line is the first line, line is last).
+            start_line_raw = raw.get("suggestion_start_line")
+            start_line: int | None = None
+            if start_line_raw is not None:
+                try:
+                    sl = int(start_line_raw)
+                    if sl <= line:
+                        start_line = sl
+                    else:
+                        log.warning(
+                            "dropping suggestion_start_line {} > line {} for {}:{}",
+                            sl, line, raw.get("file"), line,
+                        )
+                except (TypeError, ValueError):
+                    log.warning("non-int suggestion_start_line: {!r}", start_line_raw)
+
             findings.append(Finding(
                 file=str(raw["file"]),
-                line=int(raw["line"]),
+                line=line,
                 severity=sev,
                 category=str(raw.get("category") or "correctness"),  # type: ignore[arg-type]
                 message=str(raw["message"]).strip(),
                 source="llm",
+                suggestion=suggestion,
+                suggestion_start_line=start_line,
             ))
         except (KeyError, ValueError, TypeError):
             log.warning("dropping malformed LLM finding: {!r}", raw)
@@ -265,10 +302,20 @@ def _filter_findings_to_diff(
             if nearest is not None and abs(nearest - f.line) <= 3:
                 log.info("snapped finding {}:{} -> {}", f.file, f.line, nearest)
                 f.line = nearest
-                out.append(f)
             else:
                 log.warning("dropping finding on non-added line: {}:{}", f.file, f.line)
-            continue
+                continue
+
+        # If a multi-line suggestion's start_line isn't a `+` line, the
+        # GitHub API will reject the comment. Drop the suggestion (keep
+        # the finding's message) rather than throw the whole comment away.
+        if f.suggestion_start_line is not None and f.suggestion_start_line not in lines:
+            log.warning(
+                "dropping suggestion_start_line {} (not in diff) for {}:{}",
+                f.suggestion_start_line, f.file, f.line,
+            )
+            f.suggestion = None
+            f.suggestion_start_line = None
         out.append(f)
     return out
 
@@ -346,12 +393,37 @@ def _attribution(name: str, marker: str) -> str:
     return f"_— {name} · `{marker}`_"
 
 
-def _format_inline_body(f: Finding, name: str, marker: str) -> str:
-    return (
-        f"**{_SEVERITY_BADGE[f.severity]} · {f.category}**\n\n"
-        f"{f.message}\n\n"
-        f"{_attribution(name, marker)}"
-    )
+def _format_inline_body(
+    f: Finding,
+    name: str,
+    marker: str,
+    *,
+    provider_kind: Literal["github", "bitbucket"] = "bitbucket",
+) -> str:
+    """Render a finding's inline-comment body.
+
+    On GitHub a non-empty `f.suggestion` becomes a ```suggestion fence
+    that the PR author can apply in one click. On Bitbucket the same
+    content lands inside a plain ``` code fence labelled "Suggested
+    fix" — visually the same before/after, but no apply button (the
+    feature simply doesn't exist on Bitbucket Cloud).
+    """
+    parts = [
+        f"**{_SEVERITY_BADGE[f.severity]} · {f.category}**",
+        "",
+        f.message,
+    ]
+    if f.suggestion:
+        body = f.suggestion.rstrip("\n")
+        if provider_kind == "github":
+            # GitHub recognises this fence and renders the apply button.
+            parts += ["", "```suggestion", body, "```"]
+        else:
+            # Bitbucket has no suggestion syntax — be explicit so the
+            # reader knows this is a *proposed* replacement.
+            parts += ["", "_Suggested fix:_", "```", body, "```"]
+    parts += ["", _attribution(name, marker)]
+    return "\n".join(parts)
 
 
 def _format_summary_body(result: ReviewResult, name: str, marker: str) -> str:
@@ -568,6 +640,13 @@ class Reviewer:
         s = self._s
         marker = s.bot_marker
         name = reviewer_display_name(s.claude_model)
+        # GitHub renders ```suggestion blocks as one-click applies;
+        # Bitbucket has no such feature. We pick by clone-host so the
+        # logic stays out of provider-specific code paths.
+        host = self._provider.clone_host
+        provider_kind: Literal["github", "bitbucket"] = (
+            "github" if "github" in host else "bitbucket"
+        )
 
         # Idempotency: pull existing bot comments first.
         if not s.dry_run:
@@ -586,7 +665,9 @@ class Reviewer:
                 log.info("skip already-commented line {}:{}", f.file, f.line)
                 continue
 
-            body = _format_inline_body(f, name, marker)
+            body = _format_inline_body(
+                f, name, marker, provider_kind=provider_kind,
+            )
             if s.dry_run:
                 print(f"[DRY-RUN inline] {f.file}:{f.line}\n{body}\n")
             else:
@@ -598,6 +679,15 @@ class Reviewer:
                         body=body,
                         # Required by GitHub; ignored by Bitbucket.
                         commit_id=self._head_commit or None,
+                        # Only forward start_line when the finding has a
+                        # multi-line suggestion AND we're on GitHub (the
+                        # only provider whose API understands the range).
+                        start_line=(
+                            f.suggestion_start_line
+                            if f.suggestion and f.suggestion_start_line is not None
+                            and provider_kind == "github"
+                            else None
+                        ),
                     ),
                 )
             posted += 1
