@@ -127,7 +127,7 @@ docker compose logs -f bugbot caddy
 
    | Field | Value |
    |---|---|
-   | Payload URL | `https://<yourdomain>/webhook/github` (or `…/webhook/github/<domain>` for explicit focus, e.g. `…/webhook/github/ml`) |
+   | Payload URL | `https://<yourdomain>/webhook/github` (or `…/webhook/github/<domain>` for explicit focus, e.g. `…/webhook/github/asr`) |
    | Content type | `application/json` |
    | Secret | the value of `BUGBOT_GITHUB_WEBHOOK_SECRET` |
    | SSL verification | enabled |
@@ -226,7 +226,7 @@ each repo choose one via its webhook URL.
 |---|---|
 | `general` | Security data leak, security bugs (SQLi/SSRF/authn), correctness, data-loss / blast-radius, performance footguns. The historical default. |
 | `data-eng` | Pipeline correctness (DAG deps, idempotency, watermarks), schema/migration safety, partition pruning, timezone / nullability bugs, query patterns (N+1, full scans, collect()/toPandas()). |
-| `ml` | Data leakage across train/val/test (especially speaker overlap for ASR), reproducibility (seeds, pinned deps, deterministic ops), training correctness (loss vs metric, gradient flow, mixed-precision, LR schedule, `train()/eval()`), audio/feature pipeline bugs (sample-rate mismatch, padding/masking, tokenizer drift), and missed optimisation opportunities. |
+| `asr` | Speech-recognition / ML training focus. Data leakage across train/val/test (especially speaker overlap), reproducibility (seeds, pinned deps, deterministic ops), training correctness (loss vs metric, gradient flow, mixed-precision, LR schedule, `train()/eval()`), audio/feature pipeline bugs (sample-rate mismatch, padding/masking, tokenizer drift), and missed optimisation opportunities. |
 
 Selection happens **in the webhook URL** — each repo points its webhook
 at the right suffix:
@@ -234,7 +234,7 @@ at the right suffix:
 ```
 https://<host>/webhook/bitbucket               → BUGBOT_DEFAULT_DOMAIN
 https://<host>/webhook/bitbucket/data-eng      → data-eng focus
-https://<host>/webhook/github/ml               → ml focus
+https://<host>/webhook/github/asr              → asr focus
 ```
 
 That way the "what kind of repo is this?" decision lives next to the

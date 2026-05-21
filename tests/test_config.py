@@ -125,7 +125,7 @@ def test_both_providers_simultaneously(monkeypatch):
 
 # ----------------------------------------------------------------------
 # Domain default. The actual domain selection happens via webhook URL
-# path (e.g. /webhook/github/ml); this just controls what the bare path
+# path (e.g. /webhook/github/asr); this just controls what the bare path
 # falls back to.
 # ----------------------------------------------------------------------
 
@@ -140,6 +140,6 @@ def test_default_domain_can_be_overridden(monkeypatch):
     # Useful when most repos are ML — set this once and `/webhook/github`
     # bare path implicitly picks the ML focus.
     _set_required(monkeypatch)
-    monkeypatch.setenv("BUGBOT_DEFAULT_DOMAIN", "ml")
+    monkeypatch.setenv("BUGBOT_DEFAULT_DOMAIN", "asr")
     s = Settings(_env_file=None)  # type: ignore[call-arg]
-    assert s.default_domain == "ml"
+    assert s.default_domain == "asr"

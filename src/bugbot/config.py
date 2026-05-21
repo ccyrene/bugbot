@@ -138,7 +138,7 @@ class Settings(BaseSettings):
     # The webhook URL path selects the domain prompt:
     #     /webhook/bitbucket            → default_domain
     #     /webhook/bitbucket/data-eng   → "data-eng"
-    #     /webhook/github/ml            → "ml"
+    #     /webhook/github/asr           → "asr"
     # Each forge points each repo's webhook at the right suffix. The
     # reviewer loads `bugbot/prompts/focus/<domain>.md` accordingly.
     # Unknown domains 400 at the webhook layer rather than silently

@@ -9,7 +9,7 @@ POST {github_webhook_path}                   — GitHub webhook, default domain
 POST {github_webhook_path}/{domain}          — GitHub webhook, explicit domain
 
 The URL path's optional `{domain}` segment selects which focus prompt the
-reviewer applies — e.g. `/webhook/github/ml` reviews with the ML/ASR
+reviewer applies — e.g. `/webhook/github/asr` reviews with the ASR/ML
 priorities, `/webhook/bitbucket/data-eng` with the pipeline priorities.
 Each repo's webhook config points at the right URL, so the domain
 travels with the request rather than living in a server-side env map.

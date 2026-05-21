@@ -354,7 +354,7 @@ def test_bitbucket_url_with_domain_propagates_to_job(client):
 def test_github_url_with_domain_propagates_to_job(client_both):
     body = _github_payload(action="opened", number=42)
     r = client_both.post(
-        "/webhook/github/ml",
+        "/webhook/github/asr",
         headers={
             "X-GitHub-Event": "pull_request",
             "X-Hub-Signature-256": _sign_gh(body),
@@ -364,7 +364,7 @@ def test_github_url_with_domain_propagates_to_job(client_both):
     )
     assert r.status_code == 202
     job = client_both.submitted[0]  # type: ignore[attr-defined]
-    assert job.domain == "ml"
+    assert job.domain == "asr"
     assert job.provider == "github"
 
 

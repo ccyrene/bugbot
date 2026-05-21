@@ -137,8 +137,8 @@ def test_focus_data_eng_mentions_pipeline_specific_landmines():
     assert "airflow" in text or "dag" in text or "pipeline" in text
 
 
-def test_focus_ml_mentions_speech_and_training_landmines():
-    block = _load_focus("ml")
+def test_focus_asr_mentions_speech_and_training_landmines():
+    block = _load_focus("asr")
     text = block.lower()
     # Five priority areas the user requested are all represented.
     assert "leakage" in text
@@ -163,7 +163,7 @@ def test_system_template_substitutes_focus_block_into_full_prompt():
     reviewer uses str.replace() (not str.format) so the literal `{...}`
     JSON output schema inside system.md doesn't conflict."""
     template = _load_prompt("system.md")
-    rendered = template.replace("{focus_block}", _load_focus("ml"))
+    rendered = template.replace("{focus_block}", _load_focus("asr"))
     # Universal rules survive.
     assert "Only comment on lines that are added in this diff" in rendered
     # Domain focus landed in place of the placeholder.

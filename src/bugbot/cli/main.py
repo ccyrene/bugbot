@@ -72,7 +72,7 @@ def review_pr(
     ),
     domain: Optional[str] = typer.Option(
         None, "--domain",
-        help="Focus domain (general / data-eng / ml). Defaults to BUGBOT_DEFAULT_DOMAIN.",
+        help="Focus domain (general / data-eng / asr). Defaults to BUGBOT_DEFAULT_DOMAIN.",
     ),
     artifact: Optional[Path] = typer.Option(
         None, "--artifact", help="If set, write the review JSON to this file."

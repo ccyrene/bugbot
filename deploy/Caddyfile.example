@@ -35,7 +35,7 @@ bugbot.example.com {
     # ----- Path allowlist --------------------------------------------
     # Only the webhook endpoints + healthcheck are exposed. Everything else
     # 404s so scanners get nothing useful. The trailing `/*` covers the
-    # domain-suffixed variants (e.g. /webhook/github/ml, /webhook/bitbucket/
+    # domain-suffixed variants (e.g. /webhook/github/asr, /webhook/bitbucket/
     # data-eng) — bugbot itself validates the domain segment and 400s
     # unknowns. The unsuffixed paths are also allowed (= default domain).
     # `/webhook/github` is harmless to expose even on a Bitbucket-only
