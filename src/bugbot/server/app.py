@@ -112,8 +112,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not s.bitbucket_enabled:
             raise HTTPException(status_code=503, detail="bitbucket not configured")
 
-        resolved_domain = _resolve_domain(domain, s.default_domain)
-
         # 1. IP allowlist
         if s.webhook_enforce_ip_allowlist:
             peer = request.client.host if request.client else ""
@@ -139,7 +137,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         x_event_key)
             raise HTTPException(status_code=401, detail="bad signature")
 
-        # 3. Parse
+        # 3. Domain validation. Done after auth so external probes don't
+        # learn the URL routing structure from a 400 vs 403 split — but
+        # before parse so a typo'd URL never enqueues a job.
+        resolved_domain = _resolve_domain(domain, s.default_domain)
+
+        # 4. Parse
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):
@@ -222,8 +225,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not s.github_enabled:
             raise HTTPException(status_code=503, detail="github not configured")
 
-        resolved_domain = _resolve_domain(domain, s.default_domain)
-
         # 1. IP allowlist
         if s.webhook_enforce_ip_allowlist:
             peer = request.client.host if request.client else ""
@@ -252,7 +253,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if x_github_event == "ping":
             return JSONResponse({"status": "pong"}, status_code=204)
 
-        # 3. Parse
+        # 3. Domain validation (after auth — see bitbucket handler).
+        resolved_domain = _resolve_domain(domain, s.default_domain)
+
+        # 4. Parse
         try:
             payload = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):

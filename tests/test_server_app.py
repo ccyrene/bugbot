@@ -401,3 +401,22 @@ def test_webhook_domain_blocks_path_traversal(client):
         content=body,
     )
     assert r.status_code in (400, 404)
+
+
+def test_unknown_domain_only_surfaces_after_auth(client):
+    """Without a valid HMAC signature, an external probe must get 401
+    regardless of which domain segment they tried — 400 would leak the
+    URL routing structure ("which suffixes are valid")."""
+    body = _payload(pr_id=14)
+    # Unsigned request to an unknown domain path: must look identical to
+    # an unsigned request to a known-good path.
+    r = client.post(
+        "/webhook/bitbucket/nope",
+        headers={
+            "X-Event-Key": "pullrequest:created",
+            # No X-Hub-Signature.
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 401
