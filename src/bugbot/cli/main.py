@@ -70,6 +70,10 @@ def review_pr(
         "bitbucket", "--provider", "-P",
         help="Which provider to review against: bitbucket or github.",
     ),
+    domain: Optional[str] = typer.Option(
+        None, "--domain",
+        help="Focus domain (general / data-eng / ml). Defaults to BUGBOT_DEFAULT_DOMAIN.",
+    ),
     artifact: Optional[Path] = typer.Option(
         None, "--artifact", help="If set, write the review JSON to this file."
     ),
@@ -119,7 +123,9 @@ def review_pr(
         timeout=settings.claude_timeout_seconds,
     )
     with client, claude:  # type: ignore[arg-type]
-        result = Reviewer(settings, provider=client, claude=claude).run(pr_id)
+        result = Reviewer(settings, provider=client, claude=claude).run(
+            pr_id, domain=domain,
+        )
 
     payload = result_to_json(result)
     if artifact:

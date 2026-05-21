@@ -68,6 +68,39 @@ def _load_prompt(name: str) -> str:
     return resource_files("bugbot.prompts").joinpath(name).read_text(encoding="utf-8")
 
 
+_DOMAIN_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def is_valid_domain(domain: str) -> bool:
+    """A domain is valid if it matches the safe-char regex AND has a
+    corresponding `prompts/focus/<domain>.md` file.
+
+    The regex isn't only cosmetic — it also blocks importlib path
+    traversal via `..` or `/` in the URL segment.
+    """
+    if not domain or not _DOMAIN_RE.fullmatch(domain):
+        return False
+    return resource_files("bugbot.prompts.focus").joinpath(
+        f"{domain}.md"
+    ).is_file()
+
+
+def _load_focus(domain: str) -> str:
+    """Load the per-domain "what to look for" block.
+
+    Unknown domains fall back to `general.md` and log a warning. The
+    webhook layer should already have rejected unknown domains via
+    `is_valid_domain`, so reaching this branch usually means the CLI
+    `review-pr --domain` flag passed something not on disk.
+    """
+    pkg = resource_files("bugbot.prompts.focus")
+    candidate = pkg.joinpath(f"{domain}.md")
+    if not candidate.is_file():
+        log.warning("unknown review domain {!r} — falling back to 'general'", domain)
+        candidate = pkg.joinpath("general.md")
+    return candidate.read_text(encoding="utf-8")
+
+
 def _format_security_block(findings: list[SecretFinding]) -> str:
     if not findings:
         return "_No secrets detected by the pre-scan._"
@@ -390,16 +423,22 @@ class Reviewer:
         self._s = settings
         self._provider = provider
         self._llm = claude
-        self._system_prompt = _load_prompt("system.md")
+        # `system.md` is a template with a `{focus_block}` placeholder —
+        # final rendering happens per-PR in `run()` so we can pick the
+        # right domain prompt based on workspace/repo.
+        self._system_template = _load_prompt("system.md")
         self._user_template = _load_prompt("user.md")
         # Captured during `run()` — needed when posting inline comments on
         # GitHub, which anchors every review comment to a commit SHA.
         self._head_commit: str = ""
 
-    def run(self, pr_id: int) -> ReviewResult:
+    def run(self, pr_id: int, *, domain: str | None = None) -> ReviewResult:
         s = self._s
         pr = self._provider.get_pull_request(pr_id)
         self._head_commit = pr.source_commit
+        # Resolve domain: explicit arg (from webhook URL path) wins;
+        # fall back to the server's default_domain.
+        self._domain = domain or s.default_domain
         log.info("PR #{} '{}' by {} ({} -> {})", pr.id, pr.title, pr.author,
                  pr.source_branch, pr.destination_branch)
 
@@ -468,11 +507,20 @@ class Reviewer:
                 head_commit=clone.head_commit,
             )
 
-            log.info("calling claude CLI (~{} chars, cwd={})",
-                     len(user_prompt), clone.path)
+            # We use plain str.replace() instead of str.format() because
+            # the system template contains a literal `{...}` JSON output
+            # schema that would otherwise blow up format-string parsing.
+            focus_block = _load_focus(self._domain)
+            system_prompt = self._system_template.replace(
+                "{focus_block}", focus_block,
+            )
+            log.info(
+                "calling claude CLI (~{} chars, cwd={}, domain={})",
+                len(user_prompt), clone.path, self._domain,
+            )
             try:
                 chat = self._llm.chat(
-                    system_prompt=self._system_prompt,
+                    system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     cwd=str(clone.path),
                     allowed_tools=s.claude_allowed_tools_list,

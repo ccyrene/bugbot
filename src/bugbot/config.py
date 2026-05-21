@@ -134,6 +134,17 @@ class Settings(BaseSettings):
     # via an inline code span in the comment template.
     bot_marker: str = "bugbot:v1"
 
+    # ---- Review domain (selected per webhook via URL path) ---------------
+    # The webhook URL path selects the domain prompt:
+    #     /webhook/bitbucket            → default_domain
+    #     /webhook/bitbucket/data-eng   → "data-eng"
+    #     /webhook/github/ml            → "ml"
+    # Each forge points each repo's webhook at the right suffix. The
+    # reviewer loads `bugbot/prompts/focus/<domain>.md` accordingly.
+    # Unknown domains 400 at the webhook layer rather than silently
+    # falling back, so a typo in a repo's webhook config is loud.
+    default_domain: str = "general"
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     @property
@@ -143,6 +154,7 @@ class Settings(BaseSettings):
     @property
     def claude_allowed_tools_list(self) -> list[str]:
         return [t.strip() for t in self.claude_allowed_tools.split(",") if t.strip()]
+
 
     @property
     def bitbucket_enabled(self) -> bool:

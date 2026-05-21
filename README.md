@@ -127,7 +127,7 @@ docker compose logs -f bugbot caddy
 
    | Field | Value |
    |---|---|
-   | Payload URL | `https://<yourdomain>/webhook/github` |
+   | Payload URL | `https://<yourdomain>/webhook/github` (or `…/webhook/github/<domain>` for explicit focus, e.g. `…/webhook/github/ml`) |
    | Content type | `application/json` |
    | Secret | the value of `BUGBOT_GITHUB_WEBHOOK_SECRET` |
    | SSL verification | enabled |
@@ -211,6 +211,42 @@ All settings live in `deploy/.env` (prefix `BUGBOT_`). See
 | `BUGBOT_IGNORE_GLOBS` | `*.lock,*.min.js,…` | | Comma-separated globs |
 | `BUGBOT_DRY_RUN` | `false` | | Log comments instead of posting |
 | `BUGBOT_LOG_LEVEL` | `INFO` | | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
+| `BUGBOT_DEFAULT_DOMAIN` | `general` | | Domain used when a webhook hits a bare path (no `/<domain>` suffix). See "Per-repo review focus" |
+
+---
+
+## Per-repo review focus
+
+A data-eng pipeline and an ML training repo care about very different
+things. Instead of one generic "look for security/correctness/perf"
+prompt, bugbot ships a small set of **domain focus prompts** and lets
+each repo choose one via its webhook URL.
+
+| Domain | What it prioritises |
+|---|---|
+| `general` | Security data leak, security bugs (SQLi/SSRF/authn), correctness, data-loss / blast-radius, performance footguns. The historical default. |
+| `data-eng` | Pipeline correctness (DAG deps, idempotency, watermarks), schema/migration safety, partition pruning, timezone / nullability bugs, query patterns (N+1, full scans, collect()/toPandas()). |
+| `ml` | Data leakage across train/val/test (especially speaker overlap for ASR), reproducibility (seeds, pinned deps, deterministic ops), training correctness (loss vs metric, gradient flow, mixed-precision, LR schedule, `train()/eval()`), audio/feature pipeline bugs (sample-rate mismatch, padding/masking, tokenizer drift), and missed optimisation opportunities. |
+
+Selection happens **in the webhook URL** — each repo points its webhook
+at the right suffix:
+
+```
+https://<host>/webhook/bitbucket               → BUGBOT_DEFAULT_DOMAIN
+https://<host>/webhook/bitbucket/data-eng      → data-eng focus
+https://<host>/webhook/github/ml               → ml focus
+```
+
+That way the "what kind of repo is this?" decision lives next to the
+repo itself (in its webhook config), not in a server-side map you have
+to keep in sync.
+
+Add your own focus by dropping a new file at
+`src/bugbot/prompts/focus/<name>.md` and rebuilding — repos can then
+point at `/webhook/<provider>/<name>`. **Unknown domains 400** at the
+webhook layer (loud failure visible in the forge's "Recent Deliveries"
+view), so a typo in a repo's webhook URL won't silently swap the
+priorities.
 
 ---
 

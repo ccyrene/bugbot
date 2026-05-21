@@ -36,6 +36,10 @@ class ReviewJob:
     repo_slug: str
     pr_id: int
     provider: Provider = "bitbucket"
+    # Picked by the URL path the webhook posted to:
+    #   /webhook/{provider}            → settings.default_domain
+    #   /webhook/{provider}/{domain}   → that domain (validated upstream)
+    domain: str = "general"
 
 
 class WorkerConfigError(RuntimeError):
@@ -110,8 +114,9 @@ class ReviewWorker:
 
     def _run_review(self, job: ReviewJob) -> None:
         s = self._s
-        log.info("starting review {}:{}/{}#{}",
-                 job.provider, job.workspace, job.repo_slug, job.pr_id)
+        log.info("starting review {}:{}/{}#{} (domain={})",
+                 job.provider, job.workspace, job.repo_slug, job.pr_id,
+                 job.domain)
         provider = self._build_provider(job)
         claude = ClaudeCliClient(
             cli_path=s.claude_cli_path,
@@ -119,7 +124,9 @@ class ReviewWorker:
             timeout=s.claude_timeout_seconds,
         )
         with provider, claude:  # type: ignore[arg-type]
-            Reviewer(s, provider=provider, claude=claude).run(job.pr_id)
+            Reviewer(s, provider=provider, claude=claude).run(
+                job.pr_id, domain=job.domain,
+            )
 
     def shutdown(self, wait: bool = True) -> None:
         self._pool.shutdown(wait=wait, cancel_futures=False)

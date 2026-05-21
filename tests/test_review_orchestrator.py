@@ -8,6 +8,8 @@ from bugbot.services.review import (
     _dedupe,
     _filter_findings_to_diff,
     _format_security_block,
+    _load_focus,
+    _load_prompt,
     _parse_llm_json,
     _valid_lines_per_file,
 )
@@ -111,3 +113,63 @@ def test_security_block_formats_with_masked_snippet():
 
 def test_security_block_when_empty():
     assert "No secrets" in _format_security_block([])
+
+
+# ----------------------------------------------------------------------
+# Per-domain focus prompts
+# ----------------------------------------------------------------------
+
+
+def test_focus_general_has_security_priority():
+    """`general` is the fallback domain — it must look like the original
+    pre-domain prompt so existing deployments aren't silently weakened."""
+    block = _load_focus("general")
+    assert "Security data leak" in block
+    assert "Correctness bugs" in block
+
+
+def test_focus_data_eng_mentions_pipeline_specific_landmines():
+    block = _load_focus("data-eng")
+    # We care about the focus being domain-flavoured — not the exact
+    # wording. Spot-check a few terms that are unmistakably data-eng.
+    text = block.lower()
+    assert "schema" in text or "migration" in text or "partition" in text
+    assert "airflow" in text or "dag" in text or "pipeline" in text
+
+
+def test_focus_ml_mentions_speech_and_training_landmines():
+    block = _load_focus("ml")
+    text = block.lower()
+    # Five priority areas the user requested are all represented.
+    assert "leakage" in text
+    assert "reproducibility" in text or "seed" in text
+    assert "loss" in text or "gradient" in text
+    assert "sample rate" in text or "spec" in text or "audio" in text
+    # The ASR-specific cues are why we shipped a separate file at all —
+    # losing them would mean this collapses back into the general prompt.
+    assert "speaker" in text or "asr" in text
+
+
+def test_unknown_domain_falls_back_to_general():
+    # Typo in BUGBOT_REPO_DOMAINS shouldn't produce an empty focus block —
+    # the reviewer would have no priorities and freelance them.
+    fallback = _load_focus("does-not-exist")
+    general = _load_focus("general")
+    assert fallback == general
+
+
+def test_system_template_substitutes_focus_block_into_full_prompt():
+    """End-to-end: system.md has a `{focus_block}` placeholder, and the
+    reviewer uses str.replace() (not str.format) so the literal `{...}`
+    JSON output schema inside system.md doesn't conflict."""
+    template = _load_prompt("system.md")
+    rendered = template.replace("{focus_block}", _load_focus("ml"))
+    # Universal rules survive.
+    assert "Only comment on lines that are added in this diff" in rendered
+    # Domain focus landed in place of the placeholder.
+    assert "{focus_block}" not in rendered
+    assert "speaker" in rendered.lower() or "leakage" in rendered.lower()
+    # The JSON output-schema example must still be present and intact
+    # (broken-format-string regression would mangle it).
+    assert '"summary"' in rendered
+    assert '"findings"' in rendered

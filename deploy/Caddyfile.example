@@ -34,11 +34,16 @@ bugbot.example.com {
 
     # ----- Path allowlist --------------------------------------------
     # Only the webhook endpoints + healthcheck are exposed. Everything else
-    # 404s so scanners get nothing useful. `/webhook/github` is harmless
-    # to expose even on a Bitbucket-only deployment — bugbot itself
-    # responds 503 if GitHub isn't configured.
+    # 404s so scanners get nothing useful. The trailing `/*` covers the
+    # domain-suffixed variants (e.g. /webhook/github/ml, /webhook/bitbucket/
+    # data-eng) — bugbot itself validates the domain segment and 400s
+    # unknowns. The unsuffixed paths are also allowed (= default domain).
+    # `/webhook/github` is harmless to expose even on a Bitbucket-only
+    # deployment — bugbot itself responds 503 if GitHub isn't configured.
     @allowed {
-        path /webhook/bitbucket /webhook/github /healthz
+        path /healthz
+        path /webhook/bitbucket /webhook/bitbucket/*
+        path /webhook/github /webhook/github/*
     }
     handle @allowed {
         # Cap request body — webhook payloads are usually well under 1 MB.

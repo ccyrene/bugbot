@@ -310,3 +310,94 @@ def test_healthz_reports_enabled_providers(client_both):
     body = r.json()
     assert body["status"] == "ok"
     assert body["providers"] == {"bitbucket": True, "github": True}
+
+
+# ----------------------------------------------------------------------
+# URL-path domain routing — the domain travels with the webhook URL.
+# ----------------------------------------------------------------------
+
+
+def test_bitbucket_bare_path_uses_default_domain(client):
+    body = _payload(pr_id=10)
+    r = client.post(
+        "/webhook/bitbucket",
+        headers={
+            "X-Event-Key": "pullrequest:created",
+            "X-Hub-Signature": _sign(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 202
+    job = client.submitted[0]  # type: ignore[attr-defined]
+    assert job.domain == "general"  # = default_domain
+
+
+def test_bitbucket_url_with_domain_propagates_to_job(client):
+    body = _payload(pr_id=11)
+    r = client.post(
+        "/webhook/bitbucket/data-eng",
+        headers={
+            "X-Event-Key": "pullrequest:created",
+            "X-Hub-Signature": _sign(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 202
+    body_json = r.json()
+    assert body_json["domain"] == "data-eng"
+    job = client.submitted[0]  # type: ignore[attr-defined]
+    assert job.domain == "data-eng"
+
+
+def test_github_url_with_domain_propagates_to_job(client_both):
+    body = _github_payload(action="opened", number=42)
+    r = client_both.post(
+        "/webhook/github/ml",
+        headers={
+            "X-GitHub-Event": "pull_request",
+            "X-Hub-Signature-256": _sign_gh(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 202
+    job = client_both.submitted[0]  # type: ignore[attr-defined]
+    assert job.domain == "ml"
+    assert job.provider == "github"
+
+
+def test_webhook_url_with_unknown_domain_400s(client):
+    """A typo in a repo's webhook URL must be loud — better to reject
+    the delivery so the operator sees it in the forge's "Recent
+    Deliveries" tab than to silently swap the focus prompt."""
+    body = _payload(pr_id=12)
+    r = client.post(
+        "/webhook/bitbucket/asr-mdoel",  # typo
+        headers={
+            "X-Event-Key": "pullrequest:created",
+            "X-Hub-Signature": _sign(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code == 400
+    assert "unknown review domain" in r.json().get("detail", "")
+
+
+def test_webhook_domain_blocks_path_traversal(client):
+    """Even if the path matches FastAPI's `{domain}` segment, the domain
+    validator must reject anything outside `[A-Za-z0-9_-]+`."""
+    body = _payload(pr_id=13)
+    # Trying to escape the focus directory via the domain segment.
+    r = client.post(
+        "/webhook/bitbucket/..%2Fetc%2Fpasswd",
+        headers={
+            "X-Event-Key": "pullrequest:created",
+            "X-Hub-Signature": _sign(body),
+            "Content-Type": "application/json",
+        },
+        content=body,
+    )
+    assert r.status_code in (400, 404)

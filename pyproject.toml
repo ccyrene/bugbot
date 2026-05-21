@@ -47,6 +47,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "bugbot.prompts" = ["*.md"]
+"bugbot.prompts.focus" = ["*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
