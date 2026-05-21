@@ -750,49 +750,84 @@ class Reviewer:
         else:
             already_files = set()
 
-        # One inline comment per file, anchored at the worst finding's
-        # line. `cap` now counts FILES with comments, not individual
-        # findings — fits the user-facing "fewer comments" goal.
+        # Per-file posting strategy:
+        #   * Findings WITH a `suggestion` → one comment each, anchored at
+        #     the finding's own line so GitHub's ```suggestion fence is
+        #     clickable. Posting them inside a grouped comment would
+        #     anchor them at the WRONG line and apply the fix to
+        #     unrelated code.
+        #   * Findings WITHOUT a suggestion → one merged comment per
+        #     file (worst-severity finding becomes the anchor). Tightens
+        #     the noisy scanner-leak cases where 4-5 secrets on one
+        #     file would otherwise be 4-5 separate comments.
         cap = s.max_inline_comments
         posted = 0
         for group in _group_findings_by_file(result.findings):
             if posted >= cap:
-                log.info("inline-comment cap reached ({} files), stopping", cap)
+                log.info("inline-comment cap reached ({} comments), stopping", cap)
                 break
             file = group[0].file
             if file in already_files:
                 log.info("skip already-commented file {}", file)
                 continue
 
-            anchor = group[0]
-            body = _format_grouped_inline_body(
-                group, name, marker, provider_kind=provider_kind,
-            )
-            if s.dry_run:
-                print(f"[DRY-RUN inline] {file}@{anchor.line} ({len(group)} findings)\n{body}\n")
-            else:
-                self._provider.post_inline_comment(
-                    result.pr_id,
-                    InlineComment(
-                        file=file,
-                        line=anchor.line,
-                        body=body,
-                        # Required by GitHub; ignored by Bitbucket.
-                        commit_id=self._head_commit or None,
-                        # Range only forwarded for the anchor's suggestion
-                        # on GitHub. Non-anchor findings' suggestions
-                        # render as plain code fences inside the body, so
-                        # they don't need API-level range support.
-                        start_line=(
-                            anchor.suggestion_start_line
-                            if anchor.suggestion
-                            and anchor.suggestion_start_line is not None
-                            and provider_kind == "github"
-                            else None
-                        ),
-                    ),
+            with_suggestion = [f for f in group if f.suggestion]
+            without_suggestion = [f for f in group if not f.suggestion]
+
+            # Standalone comments for has-suggestion findings (each
+            # one-click applicable).
+            for f in with_suggestion:
+                if posted >= cap:
+                    break
+                body = _format_inline_body(
+                    f, name, marker, provider_kind=provider_kind,
                 )
-            posted += 1
+                if s.dry_run:
+                    print(f"[DRY-RUN inline-suggestion] {f.file}:{f.line}\n{body}\n")
+                else:
+                    self._provider.post_inline_comment(
+                        result.pr_id,
+                        InlineComment(
+                            file=f.file,
+                            line=f.line,
+                            body=body,
+                            commit_id=self._head_commit or None,
+                            start_line=(
+                                f.suggestion_start_line
+                                if f.suggestion_start_line is not None
+                                and provider_kind == "github"
+                                else None
+                            ),
+                        ),
+                    )
+                posted += 1
+
+            # One merged comment for the no-suggestion findings.
+            if without_suggestion and posted < cap:
+                anchor = without_suggestion[0]
+                body = _format_grouped_inline_body(
+                    without_suggestion, name, marker,
+                    provider_kind=provider_kind,
+                )
+                if s.dry_run:
+                    print(
+                        f"[DRY-RUN inline-grouped] {file}@{anchor.line} "
+                        f"({len(without_suggestion)} findings)\n{body}\n"
+                    )
+                else:
+                    self._provider.post_inline_comment(
+                        result.pr_id,
+                        InlineComment(
+                            file=file,
+                            line=anchor.line,
+                            body=body,
+                            commit_id=self._head_commit or None,
+                            # No suggestion on any finding here →
+                            # never a range comment.
+                            start_line=None,
+                        ),
+                    )
+                posted += 1
         result.posted_inline = posted
 
         # Summary always — useful audit trail even when no findings.
@@ -824,6 +859,12 @@ def result_to_json(result: ReviewResult) -> str:
                 "category": f.category,
                 "message": f.message,
                 "source": f.source,
+                # Surface suggestion fields so the artifact reflects what
+                # the LLM actually proposed — used for offline review,
+                # eval scoring, and debugging "why wasn't there a
+                # clickable fix?" questions like this one.
+                "suggestion": f.suggestion,
+                "suggestion_start_line": f.suggestion_start_line,
             }
             for f in result.findings
         ],
