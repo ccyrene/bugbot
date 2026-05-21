@@ -350,16 +350,38 @@ def _dedupe(findings: list[Finding]) -> list[Finding]:
     return out
 
 
-def _already_commented(
-    existing: list, marker: str
-) -> set[tuple[str, int]]:
-    keys: set[tuple[str, int]] = set()
+def _already_commented_files(existing: list, marker: str) -> set[str]:
+    """Per-file idempotency.
+
+    With grouped inline comments (1 per file) we dedupe at file
+    granularity — if there's already a bot comment marked `bugbot:v1`
+    on a file, skip re-posting on a re-review. The summary comment is
+    always re-posted; it has no file anchor.
+    """
+    keys: set[str] = set()
     for c in existing:
         if marker not in (c.content or ""):
             continue
-        if c.file and c.line:
-            keys.add((c.file, c.line))
+        if c.file:
+            keys.add(c.file)
     return keys
+
+
+def _group_findings_by_file(findings: list[Finding]) -> list[list[Finding]]:
+    """Group findings by file, sorting each group by severity desc then
+    line asc. Groups themselves are sorted so the file with the
+    worst-severity finding appears first (so we hit the cap on the most
+    important files first when there are many)."""
+    by_file: dict[str, list[Finding]] = {}
+    for f in findings:
+        by_file.setdefault(f.file, []).append(f)
+    for group in by_file.values():
+        # Most severe first, ties broken by line number for stable order.
+        group.sort(key=lambda f: (-f.severity.rank, f.line))
+    # Sort groups: worst-severity-in-group first, then file path for tiebreak.
+    groups = list(by_file.values())
+    groups.sort(key=lambda g: (-g[0].severity.rank, g[0].file))
+    return groups
 
 
 _SEVERITY_BADGE = {
@@ -411,7 +433,7 @@ def _format_inline_body(
     *,
     provider_kind: Literal["github", "bitbucket"] = "bitbucket",
 ) -> str:
-    """Render a finding's inline-comment body.
+    """Render a single finding's inline-comment body.
 
     On GitHub a non-empty `f.suggestion` becomes a ```suggestion fence
     that the PR author can apply in one click. On Bitbucket the same
@@ -433,6 +455,55 @@ def _format_inline_body(
             # Bitbucket has no suggestion syntax — be explicit so the
             # reader knows this is a *proposed* replacement.
             parts += ["", "_Suggested fix:_", "```", body, "```"]
+    parts += ["", _attribution(name, marker)]
+    return "\n".join(parts)
+
+
+def _format_grouped_inline_body(
+    group: list[Finding],
+    name: str,
+    marker: str,
+    *,
+    provider_kind: Literal["github", "bitbucket"] = "bitbucket",
+) -> str:
+    """Render a per-file batch of findings as ONE inline-comment body.
+
+    The first finding in the group is the **anchor** — the comment is
+    posted at its line, so only its suggestion gets the native one-click
+    ```suggestion fence on GitHub. Suggestions for non-anchor findings
+    render as plain ``` code fences (labelled "Suggested fix") because
+    applying them at the anchor's line would corrupt unrelated code.
+    """
+    if len(group) == 1:
+        return _format_inline_body(group[0], name, marker, provider_kind=provider_kind)
+
+    file = group[0].file
+    worst = group[0].severity
+    parts: list[str] = [
+        f"**{_SEVERITY_BADGE[worst]} · {len(group)} findings in `{file}`**",
+    ]
+    for idx, f in enumerate(group):
+        is_anchor = idx == 0
+        parts += [
+            "",
+            "---",
+            "",
+            f"### Line {f.line} · {_SEVERITY_BADGE[f.severity]} · {f.category}",
+            "",
+            f.message,
+        ]
+        if f.suggestion:
+            body = f.suggestion.rstrip("\n")
+            if is_anchor and provider_kind == "github":
+                # Anchor gets the native one-click fence.
+                parts += ["", "```suggestion", body, "```"]
+            else:
+                # Non-anchor (any provider) and Bitbucket-anchor: plain
+                # fence with label. The PR author has to copy-paste the
+                # replacement themselves — applying GitHub's
+                # ```suggestion to a non-anchor line is impossible
+                # because the API anchors the whole comment at one line.
+                parts += ["", "_Suggested fix:_", "```", body, "```"]
     parts += ["", _attribution(name, marker)]
     return "\n".join(parts)
 
@@ -670,43 +741,52 @@ class Reviewer:
             "github" if "github" in host else "bitbucket"
         )
 
-        # Idempotency: pull existing bot comments first.
+        # Idempotency: pull existing bot comments first. With per-file
+        # grouping we dedupe at file granularity — one bot comment per
+        # file already on the PR means we skip re-posting on that file.
         if not s.dry_run:
             existing = self._provider.list_comments(result.pr_id)
-            already = _already_commented(existing, marker)
+            already_files = _already_commented_files(existing, marker)
         else:
-            already = set()
+            already_files = set()
 
+        # One inline comment per file, anchored at the worst finding's
+        # line. `cap` now counts FILES with comments, not individual
+        # findings — fits the user-facing "fewer comments" goal.
         cap = s.max_inline_comments
         posted = 0
-        for f in result.findings:
+        for group in _group_findings_by_file(result.findings):
             if posted >= cap:
-                log.info("inline-comment cap reached ({}), stopping", cap)
+                log.info("inline-comment cap reached ({} files), stopping", cap)
                 break
-            if (f.file, f.line) in already:
-                log.info("skip already-commented line {}:{}", f.file, f.line)
+            file = group[0].file
+            if file in already_files:
+                log.info("skip already-commented file {}", file)
                 continue
 
-            body = _format_inline_body(
-                f, name, marker, provider_kind=provider_kind,
+            anchor = group[0]
+            body = _format_grouped_inline_body(
+                group, name, marker, provider_kind=provider_kind,
             )
             if s.dry_run:
-                print(f"[DRY-RUN inline] {f.file}:{f.line}\n{body}\n")
+                print(f"[DRY-RUN inline] {file}@{anchor.line} ({len(group)} findings)\n{body}\n")
             else:
                 self._provider.post_inline_comment(
                     result.pr_id,
                     InlineComment(
-                        file=f.file,
-                        line=f.line,
+                        file=file,
+                        line=anchor.line,
                         body=body,
                         # Required by GitHub; ignored by Bitbucket.
                         commit_id=self._head_commit or None,
-                        # Only forward start_line when the finding has a
-                        # multi-line suggestion AND we're on GitHub (the
-                        # only provider whose API understands the range).
+                        # Range only forwarded for the anchor's suggestion
+                        # on GitHub. Non-anchor findings' suggestions
+                        # render as plain code fences inside the body, so
+                        # they don't need API-level range support.
                         start_line=(
-                            f.suggestion_start_line
-                            if f.suggestion and f.suggestion_start_line is not None
+                            anchor.suggestion_start_line
+                            if anchor.suggestion
+                            and anchor.suggestion_start_line is not None
                             and provider_kind == "github"
                             else None
                         ),

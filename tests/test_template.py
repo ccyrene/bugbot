@@ -8,8 +8,10 @@ from bugbot.config import Severity
 from bugbot.services.review import (
     Finding,
     ReviewResult,
+    _format_grouped_inline_body,
     _format_inline_body,
     _format_summary_body,
+    _group_findings_by_file,
     reviewer_display_name,
 )
 
@@ -162,3 +164,109 @@ def test_inline_body_omits_suggestion_block_when_no_suggestion():
     assert "```suggestion" not in body
     assert "_Suggested fix:_" not in body
     assert "```" not in body  # no fence of any kind
+
+
+# ----------------------------------------------------------------------
+# Per-file grouping
+# ----------------------------------------------------------------------
+
+
+def test_group_findings_sorts_severity_desc_then_line_asc():
+    """Within a file the worst severity comes first (so it becomes the
+    anchor); files themselves sort by their worst severity too (so a
+    cap on inline comments hits the most important files first)."""
+    findings = [
+        Finding("a.py", 5, Severity.LOW, "correctness", "low on a"),
+        Finding("b.py", 2, Severity.CRITICAL, "security", "crit on b"),
+        Finding("a.py", 1, Severity.HIGH, "correctness", "high on a"),
+        Finding("a.py", 7, Severity.HIGH, "correctness", "high2 on a"),
+    ]
+    groups = _group_findings_by_file(findings)
+    # b.py first because it holds a critical; a.py second.
+    assert [g[0].file for g in groups] == ["b.py", "a.py"]
+    # Within a.py: high (line 1) before high (line 7) before low (line 5).
+    a_lines = [f.line for f in groups[1]]
+    assert a_lines == [1, 7, 5]
+
+
+def test_grouped_body_combines_all_findings_into_one_comment():
+    findings = [
+        Finding("api/users.py", 42, Severity.CRITICAL, "security",
+                "Hardcoded API key."),
+        Finding("api/users.py", 87, Severity.MEDIUM, "correctness",
+                "Missing input validation."),
+        Finding("api/users.py", 105, Severity.LOW, "performance",
+                "Inefficient list comprehension."),
+    ]
+    body = _format_grouped_inline_body(
+        findings, "Claude Sonnet", "bugbot:v1", provider_kind="github",
+    )
+    # Header announces the count + worst severity + file.
+    assert "3 findings in `api/users.py`" in body
+    assert "🔴 critical" in body  # worst severity in header
+    # Each finding gets its own section with its line + severity badge.
+    assert "Line 42" in body
+    assert "Line 87" in body
+    assert "Line 105" in body
+    # All three message bodies survive into the merged comment.
+    assert "Hardcoded API key" in body
+    assert "Missing input validation" in body
+    assert "Inefficient list comprehension" in body
+    # Marker still there for idempotency.
+    assert "bugbot:v1" in body
+
+
+def test_grouped_body_only_anchor_gets_github_suggestion_fence():
+    """Only the worst-severity (anchor) finding's suggestion may use the
+    ```suggestion fence — GitHub anchors the whole comment at one line,
+    so applying a non-anchor suggestion there would patch the wrong
+    code."""
+    findings = [
+        Finding("a.py", 10, Severity.CRITICAL, "security",
+                "anchor msg", suggestion="anchor_fix()"),
+        Finding("a.py", 20, Severity.MEDIUM, "correctness",
+                "other msg", suggestion="other_fix()"),
+    ]
+    body = _format_grouped_inline_body(
+        findings, "Claude Sonnet", "bugbot:v1", provider_kind="github",
+    )
+    # Anchor (line 10) → real ```suggestion fence
+    assert "```suggestion\nanchor_fix()\n```" in body
+    # Non-anchor (line 20) → plain ``` fence labelled as a suggestion
+    assert "_Suggested fix:_" in body
+    assert "```\nother_fix()\n```" in body
+
+
+def test_grouped_body_falls_back_to_single_when_one_finding():
+    """A "group" of one finding should render exactly like the
+    pre-grouping single-finding format (no section headers, no count
+    line) — those decorations only earn their keep when there are
+    multiple findings."""
+    f = Finding("a.py", 10, Severity.HIGH, "correctness", "single msg")
+    body = _format_grouped_inline_body(
+        [f], "Claude Sonnet", "bugbot:v1", provider_kind="github",
+    )
+    # No grouping decorations for a single finding.
+    assert "findings in" not in body
+    assert "### Line" not in body
+    assert "single msg" in body
+
+
+def test_grouped_body_bitbucket_provider_uses_plain_fence_throughout():
+    """Bitbucket has no native suggestion concept — neither the anchor
+    nor the others get the ```suggestion fence; they all get plain
+    ``` fences with a label so the reader sees them as proposals, not
+    as bugbot's own code."""
+    findings = [
+        Finding("a.py", 10, Severity.CRITICAL, "security",
+                "msg1", suggestion="fix1"),
+        Finding("a.py", 20, Severity.MEDIUM, "correctness",
+                "msg2", suggestion="fix2"),
+    ]
+    body = _format_grouped_inline_body(
+        findings, "Claude Sonnet", "bugbot:v1", provider_kind="bitbucket",
+    )
+    assert "```suggestion" not in body
+    # Both suggestions show up in plain code fences.
+    assert "fix1" in body
+    assert "fix2" in body
