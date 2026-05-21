@@ -61,9 +61,17 @@ services:
       - "8080"
     # Bind-mount the host's ~/.claude/ if you authenticated via
     # `claude login` (option B). Comment out if you set ANTHROPIC_API_KEY.
+    #
+    # NOTE: the bind mount is **read-write** (no `:ro`). The CLI needs to
+    # rewrite `.credentials.json` whenever it refreshes the OAuth access
+    # token (~hourly). A read-only mount would make the container fail
+    # with "Not logged in" the moment the access token expires.
+    # Defense in depth: the container still runs as uid 10001 with
+    # no-new-privileges, so a compromise can read but can't escalate.
     volumes:
       - claude_state:/home/bugbot/.claude
-      # - /root/.claude:/home/bugbot/.claude:ro
+      # - /root/.claude:/home/bugbot/.claude
+      # - /root/.claude.json:/home/bugbot/.claude.json
     networks:
       - bugbot_net
     # We need to clone repos into a writable temp dir — give it a
