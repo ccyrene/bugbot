@@ -26,7 +26,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from bugbot.config import Settings, load_settings
@@ -152,7 +152,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             event = parse_webhook(event_key=x_event_key, payload=payload)
         except WebhookParseError as exc:
             log.info("ignoring unparseable bitbucket webhook: {}", exc)
-            return JSONResponse({"status": "ignored"}, status_code=204)
+            # HTTP 204 = no body. Starlette raises if we send one anyway.
+            return Response(status_code=204)
 
         if not event.should_review:
             if event.event_key in KNOWN_EVENTS:
@@ -161,7 +162,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                          event.repo_slug, event.pr_id)
             else:
                 log.info("unknown event key {}", event.event_key)
-            return JSONResponse({"status": "ignored"}, status_code=204)
+            # HTTP 204 = no body. Starlette raises if we send one anyway.
+            return Response(status_code=204)
 
         # 4. Enqueue
         job = ReviewJob(
@@ -251,7 +253,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=401, detail="bad signature")
 
         if x_github_event == "ping":
-            return JSONResponse({"status": "pong"}, status_code=204)
+            return Response(status_code=204)
 
         # 3. Domain validation (after auth — see bitbucket handler).
         resolved_domain = _resolve_domain(domain, s.default_domain)
@@ -268,13 +270,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         except WebhookParseError as exc:
             log.info("ignoring unparseable github webhook: {}", exc)
-            return JSONResponse({"status": "ignored"}, status_code=204)
+            # HTTP 204 = no body. Starlette raises if we send one anyway.
+            return Response(status_code=204)
 
         if not event.should_review:
             log.info("ignoring non-trigger github event {} ({}/{}/#{})",
                      event.event_key, event.workspace,
                      event.repo_slug, event.pr_id)
-            return JSONResponse({"status": "ignored"}, status_code=204)
+            # HTTP 204 = no body. Starlette raises if we send one anyway.
+            return Response(status_code=204)
 
         # 4. Enqueue
         job = ReviewJob(

@@ -287,6 +287,10 @@ def test_github_webhook_handles_ping_event(client_both):
         content=body,
     )
     assert r.status_code == 204
+    # HTTP 204 forbids a response body. Sending one anyway makes
+    # Starlette raise "Response content longer than Content-Length"
+    # in the middleware. Lock it down.
+    assert r.content == b""
     assert client_both.submitted == []  # type: ignore[attr-defined]
 
 

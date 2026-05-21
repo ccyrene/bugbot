@@ -169,8 +169,66 @@ class GitHubClient:
             self._repo_path(f"/pulls/{pr_id}"),
             headers={"Accept": "application/vnd.github.v3.diff"},
         )
+        # GitHub returns 406 "diff too large" when the unified diff would
+        # exceed 20,000 lines. The `/pulls/{n}/files` endpoint paginates,
+        # so it has no such cap — fall back and reconstruct a unified
+        # diff from each entry's `patch` field. We still respect bugbot's
+        # downstream BUGBOT_MAX_DIFF_CHARS truncation; this just lets us
+        # *see* the diff in the first place.
+        if resp.status_code == 406:
+            log.info(
+                "PR #{} diff > 20k lines; falling back to /files reconstruction",
+                pr_id,
+            )
+            return self._reconstruct_diff_from_files(pr_id)
         self._raise(resp, action="get_pull_request_diff")
         return resp.text
+
+    def _reconstruct_diff_from_files(self, pr_id: int) -> str:
+        """Rebuild a unified diff from `/pulls/{n}/files`.
+
+        Each entry gives us `filename`, `status` (added/removed/modified/
+        renamed/copied/changed/unchanged), and `patch` (the hunks, no
+        file header). We synthesise the `diff --git`/`---`/`+++` headers
+        so our unified-diff parser handles the output the same way it
+        handles the v3.diff representation.
+
+        Binary files have no `patch`; renames without changes have
+        empty `patch`. We emit a header-only entry for them so the
+        parser at least records the path (it'll mark them is_binary or
+        skip the empty hunks).
+        """
+        chunks: list[str] = []
+        for entry in self._paginate(self._repo_path(f"/pulls/{pr_id}/files")):
+            old = entry.get("previous_filename") or entry.get("filename")
+            new = entry.get("filename")
+            status = entry.get("status") or ""
+            patch = entry.get("patch") or ""
+            if not new:
+                continue
+
+            header = [f"diff --git a/{old} b/{new}"]
+            if status == "added":
+                header.append("new file mode 100644")
+            elif status == "removed":
+                header.append("deleted file mode 100644")
+            elif status == "renamed" and old != new:
+                header.append(f"similarity index 100%")
+                header.append(f"rename from {old}")
+                header.append(f"rename to {new}")
+
+            if patch:
+                header.append(f"--- a/{old}")
+                header.append(f"+++ b/{new}")
+                chunks.append("\n".join(header) + "\n" + patch)
+            elif status not in {"renamed", "unchanged"}:
+                # Binary or pure-rename without content change. Note the
+                # path so the parser doesn't drop it; mark binary so the
+                # security scanner / file inliner skip it cleanly.
+                header.append("Binary files differ")
+                chunks.append("\n".join(header))
+
+        return "\n".join(chunks)
 
     def list_comments(self, pr_id: int) -> list[ExistingComment]:
         """Combine *issue* comments (top-level) + *review* comments (inline).

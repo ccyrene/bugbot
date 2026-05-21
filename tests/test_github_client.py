@@ -258,6 +258,50 @@ def test_paginate_follows_link_header_rel_next():
 
 
 @respx.mock
+def test_get_diff_falls_back_when_v3diff_returns_406_too_large():
+    """GitHub's diff endpoint returns 406 once the diff exceeds 20k
+    lines. The client must catch that and reconstruct a unified diff
+    from /pulls/{n}/files (paginated; no line cap)."""
+    # The /pulls/{n} endpoint with v3.diff accept replies 406.
+    respx.get(
+        "https://api.github.com/repos/acme/thing/pulls/42"
+    ).respond(
+        status_code=406,
+        json={"message": "Sorry, the diff exceeded the maximum number of lines (20000)"},
+    )
+    # /files paginated reply: one modified + one added file.
+    files_page = [
+        {
+            "filename": "src/big.py",
+            "previous_filename": "src/big.py",
+            "status": "modified",
+            "patch": "@@ -1,2 +1,3 @@\n existing\n+new line\n existing",
+        },
+        {
+            "filename": "src/brand_new.py",
+            "status": "added",
+            "patch": "@@ -0,0 +1,1 @@\n+hello world",
+        },
+    ]
+    respx.get(
+        "https://api.github.com/repos/acme/thing/pulls/42/files"
+    ).respond(json=files_page)
+
+    out = _client().get_pull_request_diff(42)
+    # We reconstructed a unified diff with proper file headers so the
+    # downstream parser handles it identically to the v3.diff response.
+    assert "diff --git a/src/big.py b/src/big.py" in out
+    assert "--- a/src/big.py" in out
+    assert "+++ b/src/big.py" in out
+    assert "+new line" in out
+    # "added" file gets the new-file-mode marker so the diff parser
+    # records `is_new=True` (matters for the secret scanner).
+    assert "diff --git a/src/brand_new.py b/src/brand_new.py" in out
+    assert "new file mode" in out
+    assert "+hello world" in out
+
+
+@respx.mock
 def test_4xx_raises_github_error_with_redacted_body():
     # Body contains a fake AWS key — must NOT appear in the raised error.
     respx.get(
