@@ -1,30 +1,32 @@
 # =====================================================================
-# bugbot — Docker Compose for a single VPS droplet.
+# bugbot — Docker Compose for a single VPS.
 #
 # Stack:
 #   * caddy  — TLS termination, path allowlist, hardening headers
-#   * bugbot — FastAPI webhook server + claude CLI worker
+#   * bugbot — Rust webhook server + codex/claude CLI worker
 #
-# Quickstart on the droplet:
-#   1. Install Docker + docker compose plugin.
-#   2. Clone the repo (or scp the source).
+# Quickstart:
+#   1. Install Docker + compose plugin.
+#   2. Clone the repo.
 #   3. cp deploy/.env.example deploy/.env  &&  $EDITOR deploy/.env
 #   4. cp deploy/Caddyfile.example deploy/Caddyfile  &&  $EDITOR Caddyfile
-#      (replace the hostname; point the A record at the droplet first).
-#   5. cd deploy  &&  docker compose up -d --build
-#   6. In Bitbucket: create a webhook → https://<your-host>/webhook/bitbucket
+#   5. (codex/claude subscription auth) on the host:
+#        sudo bash ../scripts/install-host.sh        # runs `codex login`
+#      then uncomment the matching bind-mount below.
+#   6. cd deploy  &&  docker compose up -d --build
 #
-# Auth for the `claude` CLI (pick one):
-#   A. Set ANTHROPIC_API_KEY in .env.  Simplest, pay-per-token.
-#   B. On the host, run `claude login` once, then bind-mount the
-#      resulting ~/.claude/ into the container (see the commented
-#      `volumes` line below).  Uses your Claude subscription, no
-#      separate API key.
+# LLM auth — pick ONE per backend:
+#   codex (default backend):
+#     A. OPENAI_API_KEY in .env (pay-per-token), OR
+#     B. `codex login` on host, bind-mount ~/.codex (uses your ChatGPT plan).
+#   claude (fallback backend, BUGBOT_LLM_BACKEND=claude):
+#     A. ANTHROPIC_API_KEY in .env, OR
+#     B. `claude login` on host, bind-mount ~/.claude.
 # =====================================================================
 
 services:
   caddy:
-    image: caddy:2.8-alpine
+    image: caddy:2-alpine
     container_name: bugbot-caddy
     restart: unless-stopped
     ports:
@@ -32,7 +34,6 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      # Persist certs + acme state across restarts.
       - caddy_data:/data
       - caddy_config:/config
     networks:
@@ -51,48 +52,43 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: bugbot:0.1.0
+    image: bugbot:0.2.0
     container_name: bugbot
     restart: unless-stopped
     env_file:
       - .env
     expose:
-      # Internal-only; reachable from caddy via the docker network.
       - "8080"
-    # Bind-mount the host's ~/.claude/ if you authenticated via
-    # `claude login` (option B). Comment out if you set ANTHROPIC_API_KEY.
-    #
-    # NOTE: the bind mount is **read-write** (no `:ro`). The CLI needs to
-    # rewrite `.credentials.json` whenever it refreshes the OAuth access
-    # token (~hourly). A read-only mount would make the container fail
-    # with "Not logged in" the moment the access token expires.
-    # Defense in depth: the container still runs as uid 10001 with
-    # no-new-privileges, so a compromise can read but can't escalate.
+    # Bind-mount the host's CLI auth if you authenticated via subscription
+    # (`codex login` / `claude login`). The mounts are read-WRITE: the CLIs
+    # rewrite their token files on refresh. A read-only mount breaks once the
+    # access token expires.
     volumes:
-      - claude_state:/home/bugbot/.claude
+      - codex_state:/home/bugbot/.codex
+      # - /root/.codex:/home/bugbot/.codex
       # - /root/.claude:/home/bugbot/.claude
-      # - /root/.claude.json:/home/bugbot/.claude.json
     networks:
       - bugbot_net
-    # We need to clone repos into a writable temp dir — give it a
-    # bounded tmpfs so untrusted code never persists on disk.
+    # Untrusted PR clones go to a bounded tmpfs (memory-backed; nothing
+    # persists across restarts). Size it with the clone cap + headroom.
     tmpfs:
-      - /tmp:size=512m,mode=1777,exec
+      - /tmp:size=1g,mode=1777,exec
     security_opt:
       - no-new-privileges:true
     deploy:
       resources:
         limits:
-          # Clone + LLM run is memory-hungrier than before; bump headroom.
-          memory: 2g
-          cpus: "1.5"
+          # The codex/claude Node CLI is the memory hog (≈500MB baseline,
+          # documented spikes). Budget ~1.5–2GB per concurrent review.
+          memory: 4g
+          cpus: "2.0"
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "5"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3).status==200 else 1)"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -101,7 +97,7 @@ services:
 volumes:
   caddy_data:
   caddy_config:
-  claude_state:
+  codex_state:
 
 networks:
   bugbot_net:

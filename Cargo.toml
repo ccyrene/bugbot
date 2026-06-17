@@ -1,0 +1,71 @@
+[package]
+name = "bugbot"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.86"
+description = "Self-hosted AI PR reviewer for Bitbucket Cloud and GitHub — codex exec (default) / claude CLI backed, webhook-driven, with conversational GitHub interactivity. Rust rewrite."
+license = "MIT"
+readme = "README.md"
+keywords = ["bitbucket", "github", "code-review", "codex", "webhook"]
+categories = ["development-tools", "command-line-utilities"]
+
+[[bin]]
+name = "bugbot"
+path = "src/main.rs"
+
+[lib]
+name = "bugbot"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime + web framework
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "process", "time", "sync", "fs", "io-util", "signal", "net"] }
+axum = "0.8"
+
+# HTTP client — rustls by default in 0.13; be explicit so no transitive dep forces native-tls.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2", "charset"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Webhook HMAC (RustCrypto, constant-time verify_slice)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# Config / env
+dotenvy = "0.15"
+
+# Observability + errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1"
+thiserror = "2"
+
+# Scanner / diff / globs
+regex = "1"
+globset = "0.4"
+
+# Clone sandbox
+tempfile = "3"
+
+# IP allowlist (CIDR membership)
+ipnet = "2"
+
+# Clone-URL credential encoding
+percent-encoding = "2"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }
+tokio = { version = "1.43", features = ["rt-multi-thread", "macros", "test-util"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
