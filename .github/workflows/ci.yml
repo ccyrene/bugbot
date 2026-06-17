@@ -1,0 +1,155 @@
+name: CI
+
+# Enterprise-grade gate for the bugbot Rust crate.
+# Runs on every PR into main, every push to main, and inside the merge queue.
+# Branch protection on `main` requires the single aggregate check `CI` (the
+# `ci-success` job below) so jobs can be added/removed without re-editing
+# branch-protection settings.
+#
+# Third-party actions are pinned to full commit SHAs (supply-chain hardening);
+# the trailing comment records the human-readable version. Dependabot
+# (.github/dependabot.yml) keeps these SHAs current.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  merge_group:
+  workflow_dispatch:
+
+# Least privilege: the whole workflow only needs to read the repo.
+permissions:
+  contents: read
+
+# Cancel superseded runs for the same PR; never cancel main / merge-queue runs.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"        # incremental is wasted work on ephemeral CI; better cache hit-rate
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+          components: clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: cargo test
+        run: cargo test --workspace --all-features --locked
+
+  build-release:
+    name: build (release)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: cargo build --release
+        run: cargo build --release --locked --bin bugbot
+
+  msrv:
+    name: msrv (1.86)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      # Must match `rust-version` in Cargo.toml. The effective floor is 1.86
+      # (pulled up by icu_normalizer 2.2.0 via reqwest -> url -> idna).
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: "1.86"
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      # MSRV covers the shipped artifact (lib + bin), NOT --all-targets: the
+      # dev-dependency wiremock 0.6.5 uses let-chains and needs rustc >= 1.88,
+      # but dev-deps never reach downstream consumers or the deploy image.
+      - run: cargo check --workspace --locked
+
+  audit:
+    name: cargo-audit (RUSTSEC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+      - uses: taiki-e/install-action@15449e3094499af05d8d964a1c884208e4b8b595 # v2
+        with:
+          tool: cargo-audit
+      # Fails on any dependency with a known RUSTSEC vulnerability advisory.
+      - run: cargo audit
+
+  docker:
+    name: docker build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      # Builds the full deploy image (rust:1.92-bookworm + Node + codex/claude CLIs).
+      # This is the only place the Dockerfile is exercised end-to-end; the baked-in
+      # `codex --version && claude --version` smoke check runs as part of the build.
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+          load: false
+          tags: bugbot:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # Single aggregate gate. Branch protection requires only this context ("CI").
+  ci-success:
+    name: CI
+    if: always()
+    needs: [fmt, clippy, test, build-release, msrv, audit, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any required job did not succeed
+        if: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
+        run: |
+          echo "One or more CI jobs failed or were cancelled:"
+          echo '${{ toJSON(needs) }}'
+          exit 1
+      - run: echo "All CI gate jobs passed."

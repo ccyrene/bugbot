@@ -2,7 +2,7 @@
 name = "bugbot"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.86"
 description = "Self-hosted AI PR reviewer for Bitbucket Cloud and GitHub — codex exec (default) / claude CLI backed, webhook-driven, with conversational GitHub interactivity. Rust rewrite."
 license = "MIT"
 readme = "README.md"
