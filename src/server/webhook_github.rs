@@ -38,6 +38,9 @@ pub struct GithubComment {
     pub body: String,
     pub path: Option<String>,
     pub line: Option<u32>,
+    /// Focus domain resolved from the webhook URL suffix (e.g. `/webhook/github/data-eng`).
+    /// Set by the server before dispatch; empty when the request carried no suffix.
+    pub domain: String,
 }
 
 #[derive(Debug, Clone)]
@@ -163,6 +166,7 @@ fn parse_issue_comment(payload: &Value) -> Result<GithubEvent, WebhookParseError
             .to_string(),
         path: None,
         line: None,
+        domain: String::new(),
     }))
 }
 
@@ -207,6 +211,7 @@ fn parse_review_comment(payload: &Value) -> Result<GithubEvent, WebhookParseErro
             .and_then(Value::as_u64)
             .or_else(|| comment.get("original_line").and_then(Value::as_u64))
             .map(|n| n as u32),
+        domain: String::new(),
     }))
 }
 

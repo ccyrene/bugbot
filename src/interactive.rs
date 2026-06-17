@@ -39,20 +39,31 @@ impl FixLimiter {
         }
     }
 
-    /// Record an attempt; returns false if the PR is over the limit.
-    pub async fn try_acquire(&self, owner: &str, repo: &str, pr: u64) -> bool {
+    /// True if this PR is still under the limit. Does NOT record an attempt —
+    /// call [`record`](Self::record) once the attempt actually reaches the
+    /// protected resource (the LLM run), so transient pre-LLM failures (e.g. a
+    /// clone error) don't burn a 24h slot. The check→record gap allows a
+    /// benign race (two concurrent fixes on one PR may both pass `check`), but
+    /// the worker dedupes interact jobs per comment, so it tops out at max+1.
+    pub async fn check(&self, owner: &str, repo: &str, pr: u64) -> bool {
         let now = Instant::now();
         let mut map = self.inner.lock().await;
         let entry = map
             .entry((owner.to_string(), repo.to_string(), pr))
             .or_default();
         entry.retain(|t| now.duration_since(*t) < self.window);
-        if (entry.len() as u32) < self.max {
-            entry.push(now);
-            true
-        } else {
-            false
-        }
+        (entry.len() as u32) < self.max
+    }
+
+    /// Record one autofix attempt against the rolling per-PR window.
+    pub async fn record(&self, owner: &str, repo: &str, pr: u64) {
+        let now = Instant::now();
+        let mut map = self.inner.lock().await;
+        let entry = map
+            .entry((owner.to_string(), repo.to_string(), pr))
+            .or_default();
+        entry.retain(|t| now.duration_since(*t) < self.window);
+        entry.push(now);
     }
 }
 
@@ -140,7 +151,22 @@ pub async fn handle_comment(
     let (is_reply_to_bot, thread) = match c.kind {
         CommentKind::ReviewReply => {
             let all = gh.list_review_comments(c.pr_id).await.unwrap_or_default();
-            let root_id = c.in_reply_to_id.unwrap_or(c.comment_id);
+            // Resolve the TRUE thread root by following in_reply_to_id up the
+            // chain. GitHub usually normalizes replies to point at the
+            // top-level comment, but a reply-to-reply can carry a non-root
+            // parent — walking guarantees bot-thread detection, the transcript
+            // filter, and reply_to_review_comment all use the top-level id.
+            let mut root_id = c.in_reply_to_id.unwrap_or(c.comment_id);
+            for _ in 0..256 {
+                match all
+                    .iter()
+                    .find(|rc| rc.id == root_id)
+                    .and_then(|rc| rc.in_reply_to_id)
+                {
+                    Some(parent) if parent != root_id => root_id = parent,
+                    _ => break,
+                }
+            }
             let root_is_bot = all
                 .iter()
                 .find(|rc| rc.id == root_id)
@@ -184,9 +210,16 @@ pub async fn handle_comment(
                 c.repo_slug,
                 c.pr_id
             );
+            // Re-review with the focus domain from the webhook URL suffix, not
+            // the global default, so it matches the original automated review.
+            let domain = if c.domain.is_empty() {
+                s.default_domain.as_str()
+            } else {
+                c.domain.as_str()
+            };
             let provider = Provider::GitHub(gh);
             Reviewer::new(s, &provider, llm)
-                .run(c.pr_id, &s.default_domain)
+                .run(c.pr_id, domain)
                 .await?;
             Ok(())
         }
@@ -309,10 +342,7 @@ async fn handle_fix(
     if !s.fix_enabled {
         return post_reply(gh, c, root, "Autofix is disabled on this bugbot instance.").await;
     }
-    if !fix_limiter
-        .try_acquire(&c.workspace, &c.repo_slug, c.pr_id)
-        .await
-    {
+    if !fix_limiter.check(&c.workspace, &c.repo_slug, c.pr_id).await {
         return post_reply(
             gh,
             c,
@@ -375,6 +405,13 @@ async fn handle_fix(
         }
     };
     repo::scrub_injection_files(&clone.path);
+
+    // Charge a slot now that we're about to invoke the LLM — the expensive,
+    // abuse-prone step. The pre-LLM failure above (a clone error) returns early
+    // without consuming the per-PR quota.
+    fix_limiter
+        .record(&c.workspace, &c.repo_slug, c.pr_id)
+        .await;
 
     let req = LlmRequest {
         system_prompt: prompts::FIX.to_string(),
@@ -610,9 +647,12 @@ mod tests {
     #[tokio::test]
     async fn fix_limiter_caps_attempts() {
         let l = FixLimiter::new(2);
-        assert!(l.try_acquire("o", "r", 1).await);
-        assert!(l.try_acquire("o", "r", 1).await);
-        assert!(!l.try_acquire("o", "r", 1).await);
-        assert!(l.try_acquire("o", "r", 2).await); // different PR
+        assert!(l.check("o", "r", 1).await);
+        l.record("o", "r", 1).await;
+        assert!(l.check("o", "r", 1).await);
+        l.record("o", "r", 1).await;
+        assert!(!l.check("o", "r", 1).await); // over the cap, not recorded
+        assert!(l.check("o", "r", 2).await); // different PR
+        l.record("o", "r", 2).await;
     }
 }

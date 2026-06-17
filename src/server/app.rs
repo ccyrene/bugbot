@@ -301,7 +301,7 @@ async fn handle_github(
             );
             accepted_json(accepted, pr_id, &domain)
         }
-        GithubEvent::Comment(comment) => {
+        GithubEvent::Comment(mut comment) => {
             if !s.interactive_enabled {
                 tracing::info!(
                     "interactivity disabled — ignoring comment on #{}",
@@ -309,6 +309,9 @@ async fn handle_github(
                 );
                 return StatusCode::NO_CONTENT.into_response();
             }
+            // Carry the URL-suffix focus domain into the interactive job so an
+            // `@bugbot review` re-review uses the same focus as the auto review.
+            comment.domain = domain.clone();
             let pr_id = comment.pr_id;
             let accepted = st.worker.submit(Job::Interact(comment));
             tracing::info!(
