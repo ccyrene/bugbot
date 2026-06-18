@@ -164,13 +164,26 @@ pub struct Settings {
     pub bitbucket_timeout_seconds: f64,
 
     // ---- GitHub ----
+    /// Static Personal Access Token (PAT) auth. Optional fallback when the
+    /// GitHub App is not configured.
     pub github_token: Option<Secret>,
+    /// GitHub App numeric App ID — enables installation-token auth (preferred
+    /// over the PAT: own `[bot]` identity + short-lived auto-rotating tokens).
+    pub github_app_id: Option<String>,
+    /// GitHub App private key in PEM form (signs the App JWT). Mutually
+    /// exclusive in practice with [`github_app_private_key_path`].
+    pub github_app_private_key: Option<Secret>,
+    /// Path to the GitHub App private-key `.pem` (cleaner for Docker secrets
+    /// than stuffing a multiline PEM into an env var). Takes precedence over
+    /// the inline key when both are set.
+    pub github_app_private_key_path: Option<String>,
     pub github_webhook_secret: Option<Secret>,
     pub github_base_url: String,
     pub github_timeout_seconds: f64,
     pub github_webhook_path: String,
     /// Login of the account/app whose comments count as "ours" for
-    /// reply-to-bot detection. Auto-detected via `GET /user` when unset.
+    /// reply-to-bot detection. Auto-detected via `GET /user` for PAT auth;
+    /// **required** for App auth (installation tokens can't call `GET /user`).
     pub github_bot_login: Option<String>,
 
     // ---- git clone ----
@@ -215,7 +228,15 @@ impl Settings {
     }
 
     pub fn github_enabled(&self) -> bool {
-        self.github_token.is_some()
+        self.github_token.is_some() || self.github_app_enabled()
+    }
+
+    /// True when GitHub App credentials are present (App ID + a private key
+    /// from either the inline value or a file path). When enabled, this auth
+    /// path takes precedence over the static PAT.
+    pub fn github_app_enabled(&self) -> bool {
+        self.github_app_id.is_some()
+            && (self.github_app_private_key.is_some() || self.github_app_private_key_path.is_some())
     }
 
     pub fn ignore_glob_list(&self) -> Vec<String> {
@@ -271,6 +292,9 @@ impl Settings {
             bitbucket_timeout_seconds: env_f64("BUGBOT_BITBUCKET_TIMEOUT_SECONDS", 60.0)?,
 
             github_token: env_secret(&["BUGBOT_GITHUB_TOKEN", "GITHUB_TOKEN"]),
+            github_app_id: env_opt("BUGBOT_GITHUB_APP_ID"),
+            github_app_private_key: env_secret(&["BUGBOT_GITHUB_APP_PRIVATE_KEY"]),
+            github_app_private_key_path: env_opt("BUGBOT_GITHUB_APP_PRIVATE_KEY_PATH"),
             github_webhook_secret: env_secret(&["BUGBOT_GITHUB_WEBHOOK_SECRET"]),
             github_base_url: env_str_or("BUGBOT_GITHUB_BASE_URL", "https://api.github.com"),
             github_timeout_seconds: env_f64("BUGBOT_GITHUB_TIMEOUT_SECONDS", 60.0)?,
@@ -325,7 +349,9 @@ impl Settings {
         if !self.bitbucket_enabled() && !self.github_enabled() {
             return Err(ConfigError::Validation(
                 "No PR provider configured. Set BUGBOT_BITBUCKET_APP_PASSWORD \
-                 (or BITBUCKET_TOKEN) and/or BUGBOT_GITHUB_TOKEN."
+                 (or BITBUCKET_TOKEN), and/or for GitHub set BUGBOT_GITHUB_TOKEN \
+                 or the GitHub App credentials (BUGBOT_GITHUB_APP_ID + \
+                 BUGBOT_GITHUB_APP_PRIVATE_KEY / _PATH)."
                     .into(),
             ));
         }
@@ -337,6 +363,19 @@ impl Settings {
         if self.github_enabled() && self.github_webhook_secret.is_none() {
             return Err(ConfigError::Validation(
                 "BUGBOT_GITHUB_WEBHOOK_SECRET is required when GitHub is enabled.".into(),
+            ));
+        }
+        // App installation tokens cannot call `GET /user`, so the bot's own
+        // login can't be auto-detected. Without it the loop guard in
+        // `interactive` can't recognise the App's own comments and would react
+        // to them (e.g. its help text contains `@bugbot review`). Require it.
+        if self.github_app_enabled() && self.interactive_enabled && self.github_bot_login.is_none()
+        {
+            return Err(ConfigError::Validation(
+                "BUGBOT_GITHUB_BOT_LOGIN is required with GitHub App auth + interactivity \
+                 (set it to your App's bot login, e.g. my-app[bot]) — installation tokens \
+                 cannot auto-detect the bot identity via GET /user."
+                    .into(),
             ));
         }
         Ok(())

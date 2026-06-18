@@ -1,8 +1,10 @@
 [package]
 name = "bugbot"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-rust-version = "1.86"
+# Floor pulled up to 1.88 by jsonwebtoken -> simple_asn1 -> time 0.3.47
+# (time/time-core/time-macros require rustc 1.88). Was 1.86 (icu_normalizer).
+rust-version = "1.88"
 description = "Self-hosted AI PR reviewer for Bitbucket Cloud and GitHub — codex exec (default) / claude CLI backed, webhook-driven, with conversational GitHub interactivity. Rust rewrite."
 license = "MIT"
 readme = "README.md"
@@ -33,6 +35,10 @@ serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+
+# GitHub App auth: RS256 JWT → installation access token. ring-backed (already
+# in the tree via rustls); default `use_pem` feature gives `from_rsa_pem`.
+jsonwebtoken = "9"
 
 # Config / env
 dotenvy = "0.15"

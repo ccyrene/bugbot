@@ -34,9 +34,9 @@ pub struct AppState {
     pub ip_github: Arc<IpAllowlist>,
 }
 
-pub fn create_app(settings: Arc<Settings>) -> Router {
+pub fn create_app(settings: Arc<Settings>) -> anyhow::Result<Router> {
     let state = AppState {
-        worker: Arc::new(Worker::new(Arc::clone(&settings))),
+        worker: Arc::new(Worker::new(Arc::clone(&settings))?),
         ip_bitbucket: Arc::new(IpAllowlist::new(
             AllowlistKind::Bitbucket,
             settings.webhook_ip_cache_seconds,
@@ -51,13 +51,13 @@ pub fn create_app(settings: Arc<Settings>) -> Router {
     let bb = settings.webhook_path.clone();
     let gh = settings.github_webhook_path.clone();
 
-    Router::new()
+    Ok(Router::new()
         .route("/healthz", get(healthz))
         .route(&bb, post(bb_base))
         .route(&format!("{bb}/{{domain}}"), post(bb_domain))
         .route(&gh, post(gh_base))
         .route(&format!("{gh}/{{domain}}"), post(gh_domain))
-        .with_state(state)
+        .with_state(state))
 }
 
 async fn healthz(State(st): State<AppState>) -> Json<Value> {
@@ -173,6 +173,7 @@ async fn handle_bitbucket(
         repo_slug: event.repo_slug.clone(),
         pr_id: event.pr_id,
         domain: domain.clone(),
+        installation_id: None,
     }));
     tracing::info!(
         "{} bitbucket review {}/{}#{} (event={}, actor={}, domain={})",
@@ -281,6 +282,7 @@ async fn handle_github(
             pr_id,
             action,
             actor,
+            installation_id,
         } => {
             let accepted = st.worker.submit(Job::Review(ReviewJob {
                 provider: ProviderKind::GitHub,
@@ -288,6 +290,7 @@ async fn handle_github(
                 repo_slug: repo_slug.clone(),
                 pr_id,
                 domain: domain.clone(),
+                installation_id,
             }));
             tracing::info!(
                 "{} github review {}/{}#{} (action={}, actor={}, domain={})",

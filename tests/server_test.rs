@@ -35,6 +35,9 @@ fn github_only_settings() -> Settings {
         bitbucket_base_url: "https://api.bitbucket.org/2.0".into(),
         bitbucket_timeout_seconds: 60.0,
         github_token: Some(Secret::new("ghtok")),
+        github_app_id: None,
+        github_app_private_key: None,
+        github_app_private_key_path: None,
         github_webhook_secret: Some(Secret::new(WH_SECRET)),
         github_base_url: "https://api.github.com".into(),
         github_timeout_seconds: 60.0,
@@ -78,13 +81,13 @@ async fn send(mut req: Request<Body>) -> StatusCode {
     // oneshot we inject it manually so the ConnectInfo extractor resolves.
     req.extensions_mut()
         .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 40000))));
-    let app = create_app(Arc::new(github_only_settings()));
+    let app = create_app(Arc::new(github_only_settings())).expect("create_app");
     app.oneshot(req).await.unwrap().status()
 }
 
 #[tokio::test]
 async fn healthz_reports_providers() {
-    let app = create_app(Arc::new(github_only_settings()));
+    let app = create_app(Arc::new(github_only_settings())).expect("create_app");
     let resp = app
         .oneshot(
             Request::builder()
