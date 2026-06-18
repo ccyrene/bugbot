@@ -84,6 +84,20 @@ impl TokenUsage {
     pub fn total(&self) -> u64 {
         self.input + self.cache_creation + self.cache_read + self.output
     }
+
+    /// Compact human-readable total for the comment attribution footer, e.g.
+    /// `23.6k tokens` or `420 tokens`. Returns empty when no usage was reported
+    /// (e.g. codex on a subscription doesn't always emit token counts).
+    pub fn compact(&self) -> String {
+        let t = self.total();
+        if t == 0 {
+            String::new()
+        } else if t >= 1000 {
+            format!("{:.1}k tokens", t as f64 / 1000.0)
+        } else {
+            format!("{t} tokens")
+        }
+    }
 }
 
 pub struct LlmResponse {

@@ -1,6 +1,6 @@
 [package]
 name = "bugbot"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 # Floor pulled up to 1.88 by jsonwebtoken -> simple_asn1 -> time 0.3.47
 # (time/time-core/time-macros require rustc 1.88). Was 1.86 (icu_normalizer).
@@ -45,7 +45,10 @@ dotenvy = "0.15"
 
 # Observability + errors
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+# Fixed-offset log timestamps (e.g. UTC+7). `time` is already in the tree via
+# jsonwebtoken → simple_asn1.
+time = { version = "0.3", default-features = false, features = ["formatting"] }
 anyhow = "1"
 thiserror = "2"
 

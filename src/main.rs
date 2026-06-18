@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
 
 async fn cmd_serve(host: Option<String>, port: Option<u16>) -> Result<()> {
     let settings = Settings::load().context("loading settings")?;
-    logging::init(&settings.log_level);
+    logging::init(&settings.log_level, settings.log_utc_offset_hours);
     let host = host.unwrap_or_else(|| settings.server_host.clone());
     let port = port.unwrap_or(settings.server_port);
 
@@ -151,7 +151,7 @@ async fn cmd_review_pr(
     artifact: Option<PathBuf>,
 ) -> Result<()> {
     let settings = Settings::load().context("loading settings")?;
-    logging::init(&settings.log_level);
+    logging::init(&settings.log_level, settings.log_utc_offset_hours);
     let provider_norm = provider.trim().to_lowercase();
 
     let prov = match provider_norm.as_str() {
@@ -207,7 +207,7 @@ async fn cmd_review_pr(
 }
 
 fn cmd_scan(diff_path: PathBuf, fail_on: &str, output: Option<PathBuf>) -> Result<()> {
-    logging::init("INFO");
+    logging::init("INFO", 0);
     let text = std::fs::read_to_string(&diff_path)
         .with_context(|| format!("reading {}", diff_path.display()))?;
     let files = parse_unified_diff(&text);

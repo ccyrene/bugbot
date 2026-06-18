@@ -17,8 +17,8 @@ the PR branch).
 Enable either provider or both — each has its own webhook endpoint, IP
 allowlist, and HMAC secret.
 
-> **This is the Rust rewrite (v0.2).** The original Python implementation is
-> preserved under [`legacy/`](legacy/) for reference.
+> **This is the Rust rewrite.** (The original Python implementation lives in git
+> history prior to the rewrite.)
 
 ---
 
@@ -115,7 +115,8 @@ Register webhooks:
   auto-rotating installation tokens). **Settings → Developer settings → GitHub Apps → New**:
   - Webhook URL `https://<host>/webhook/github` (or `…/webhook/github/<domain>`),
     secret `BUGBOT_GITHUB_WEBHOOK_SECRET`
-  - Repository permissions: **Contents: R&W**, **Pull requests: R&W**, Metadata: R
+  - Repository permissions: **Contents: R&W**, **Issues: R&W**, **Pull requests: R&W**, Metadata: R
+    (Issues R&W is required for the **Issue comment** event + posting top-level PR comments)
     (Contents *Read* is enough without `@bugbot fix`)
   - Subscribe to: **Pull request**, **Issue comment**, **Pull request review comment**
   - Generate a private key (`.pem`), note the **App ID**, then **install** it on your repos.
@@ -253,6 +254,7 @@ All settings are env vars prefixed `BUGBOT_` (see
 | `BUGBOT_GIT_CLONE_MAX_MB` | `512` | reject clones above this |
 | `BUGBOT_WEBHOOK_ENFORCE_IP_ALLOWLIST` | `true` | Atlassian + GitHub `/meta` ranges |
 | `BUGBOT_DRY_RUN` | `false` | log comments instead of posting |
+| `BUGBOT_LOG_UTC_OFFSET_HOURS` | `0` | log timestamp offset from UTC (e.g. `7` = UTC+7) |
 | `BUGBOT_DEFAULT_DOMAIN` | `general` | focus when a bare webhook path is used |
 
 At least one provider must be configured, and each enabled provider needs its
@@ -345,7 +347,6 @@ bugbot/
 ├── deploy/                docker-compose, Caddyfile, .env.example
 ├── Dockerfile             cargo-chef build + Node + codex/claude CLIs
 ├── tests/                 webhook integration tests
-├── legacy/                the original Python implementation (reference)
 └── Cargo.toml
 ```
 

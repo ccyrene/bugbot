@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "bugbot"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -193,6 +193,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "tower",
  "tracing",
@@ -1802,6 +1803,7 @@ dependencies = [
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "time",
  "tracing",
  "tracing-core",
  "tracing-log",

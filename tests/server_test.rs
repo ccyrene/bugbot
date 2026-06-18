@@ -68,6 +68,7 @@ fn github_only_settings() -> Settings {
         fix_max_per_pr_24h: 3,
         fix_branch_strategy: FixBranchStrategy::NewBranch,
         log_level: "INFO".into(),
+        log_utc_offset_hours: 0,
     }
 }
 
