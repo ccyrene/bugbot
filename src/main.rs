@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 use bugbot::clients::bitbucket::BitbucketClient;
-use bugbot::clients::github::GitHubClient;
+use bugbot::clients::github_app::{self, AppAuth};
 use bugbot::clients::llm::LlmBackend;
 use bugbot::clients::provider::Provider;
 use bugbot::config::{Settings, Severity};
@@ -106,7 +106,7 @@ async fn cmd_serve(host: Option<String>, port: Option<u16>) -> Result<()> {
         settings.interactive_enabled,
     );
 
-    let app = create_app(Arc::new(settings));
+    let app = create_app(Arc::new(settings))?;
     let listener = tokio::net::TcpListener::bind((host.as_str(), port))
         .await
         .with_context(|| format!("binding {host}:{port}"))?;
@@ -169,17 +169,18 @@ async fn cmd_review_pr(
             )?)
         }
         "github" => {
-            let tok = settings
-                .github_token
-                .as_ref()
-                .context("GitHub not configured — set BUGBOT_GITHUB_TOKEN")?;
-            Provider::GitHub(GitHubClient::new(
-                tok.expose(),
+            // App auth when configured (resolves the installation from the
+            // repo, since there's no webhook to carry it), else static PAT.
+            let app_auth = AppAuth::from_settings(&settings)?;
+            let gh = github_app::build_github_client(
+                &settings,
+                app_auth.as_deref(),
                 &workspace,
                 &repo_slug,
-                &settings.github_base_url,
-                settings.github_timeout_seconds,
-            )?)
+                None,
+            )
+            .await?;
+            Provider::GitHub(gh)
         }
         other => anyhow::bail!("--provider must be 'bitbucket' or 'github', got {other:?}"),
     };

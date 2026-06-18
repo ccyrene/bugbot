@@ -41,6 +41,10 @@ pub struct GithubComment {
     /// Focus domain resolved from the webhook URL suffix (e.g. `/webhook/github/data-eng`).
     /// Set by the server before dispatch; empty when the request carried no suffix.
     pub domain: String,
+    /// GitHub App installation id from `installation.id` (present on App-delivered
+    /// webhooks). `None` under PAT auth or if the field is absent → the App auth
+    /// path then resolves it from the repo.
+    pub installation_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,11 +56,20 @@ pub enum GithubEvent {
         pr_id: u64,
         action: String,
         actor: String,
+        installation_id: Option<u64>,
     },
     /// A human comment we may respond to.
     Comment(GithubComment),
     /// Recognised but non-actionable.
     Ignore(String),
+}
+
+/// GitHub App webhooks carry the originating installation as `installation.id`.
+fn installation_id(payload: &Value) -> Option<u64> {
+    payload
+        .get("installation")
+        .and_then(|i| i.get("id"))
+        .and_then(Value::as_u64)
 }
 
 fn repo_owner_slug(payload: &Value) -> Result<(String, String), WebhookParseError> {
@@ -127,6 +140,7 @@ fn parse_pull_request(payload: &Value) -> Result<GithubEvent, WebhookParseError>
         pr_id,
         action,
         actor,
+        installation_id: installation_id(payload),
     })
 }
 
@@ -167,6 +181,7 @@ fn parse_issue_comment(payload: &Value) -> Result<GithubEvent, WebhookParseError
         path: None,
         line: None,
         domain: String::new(),
+        installation_id: installation_id(payload),
     }))
 }
 
@@ -212,6 +227,7 @@ fn parse_review_comment(payload: &Value) -> Result<GithubEvent, WebhookParseErro
             .or_else(|| comment.get("original_line").and_then(Value::as_u64))
             .map(|n| n as u32),
         domain: String::new(),
+        installation_id: installation_id(payload),
     }))
 }
 
@@ -254,6 +270,34 @@ mod tests {
             parse_github(Some("issue_comment"), &p),
             Ok(GithubEvent::Ignore(_))
         ));
+    }
+
+    #[test]
+    fn pr_trigger_carries_installation_id() {
+        let p = json!({"action":"opened","repository":{"full_name":"o/r"},"pull_request":{"number":7,"draft":false},"sender":{"login":"bob"},"installation":{"id":424242}});
+        match parse_github(Some("pull_request"), &p).unwrap() {
+            GithubEvent::PrTrigger {
+                installation_id, ..
+            } => assert_eq!(installation_id, Some(424242)),
+            _ => panic!("expected trigger"),
+        }
+        // Absent installation → None (PAT mode).
+        let no_inst = json!({"action":"opened","repository":{"full_name":"o/r"},"pull_request":{"number":7,"draft":false},"sender":{"login":"bob"}});
+        match parse_github(Some("pull_request"), &no_inst).unwrap() {
+            GithubEvent::PrTrigger {
+                installation_id, ..
+            } => assert_eq!(installation_id, None),
+            _ => panic!("expected trigger"),
+        }
+    }
+
+    #[test]
+    fn issue_comment_carries_installation_id() {
+        let p = json!({"action":"created","repository":{"full_name":"o/r"},"issue":{"number":3,"pull_request":{}},"comment":{"id":99,"body":"@bugbot review","user":{"login":"carol"}},"installation":{"id":555}});
+        match parse_github(Some("issue_comment"), &p).unwrap() {
+            GithubEvent::Comment(c) => assert_eq!(c.installation_id, Some(555)),
+            _ => panic!("expected comment"),
+        }
     }
 
     #[test]
