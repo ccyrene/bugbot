@@ -140,7 +140,13 @@ pub enum ConfigError {
 #[derive(Debug, Clone)]
 pub struct Settings {
     // ---- LLM backend ----
+    /// Primary backend.
     pub llm_backend: LlmBackendKind,
+    /// Optional failover backend: when the primary returns *any* error other
+    /// than a timeout (quota exhausted, CLI error, unsupported mode, …), the
+    /// request is retried on this backend. `None` → no failover (single
+    /// backend, the historical behaviour). Ignored when equal to `llm_backend`.
+    pub llm_fallback_backend: Option<LlmBackendKind>,
 
     // codex exec
     pub codex_cli_path: String,
@@ -268,6 +274,15 @@ impl Settings {
                 LlmBackendKind::Codex,
                 LlmBackendKind::parse,
             )?,
+            llm_fallback_backend: match env_opt("BUGBOT_LLM_FALLBACK_BACKEND") {
+                None => None,
+                Some(v) => Some(
+                    LlmBackendKind::parse(&v).ok_or_else(|| ConfigError::Invalid {
+                        key: "BUGBOT_LLM_FALLBACK_BACKEND",
+                        msg: format!("unrecognised value {v:?} (expected codex|claude)"),
+                    })?,
+                ),
+            },
 
             codex_cli_path: env_str_or("BUGBOT_CODEX_CLI_PATH", "codex"),
             codex_model: env_opt("BUGBOT_CODEX_MODEL"),

@@ -64,8 +64,11 @@ services:
     # the bind-mount form (and keep it read-WRITE — the CLIs refresh tokens).
     volumes:
       - codex_state:/home/bugbot/.codex
-      # - /root/.codex:/home/bugbot/.codex
-      # - /root/.claude:/home/bugbot/.claude
+      # Claude auth — needed when claude is the (primary or fallback) backend.
+      - claude_state:/home/bugbot/.claude
+      # Or bind-mount host auth instead of the seeded named volumes:
+      # - /home/ubuntu/.codex:/home/bugbot/.codex
+      # - /home/ubuntu/.claude:/home/bugbot/.claude
     networks:
       - bugbot_net
     tmpfs:
@@ -120,6 +123,7 @@ volumes:
   caddy_data:
   caddy_config:
   codex_state:
+  claude_state:
 
 networks:
   bugbot_net:

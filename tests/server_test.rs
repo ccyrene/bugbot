@@ -21,6 +21,7 @@ const WH_SECRET: &str = "test-webhook-secret";
 fn github_only_settings() -> Settings {
     Settings {
         llm_backend: LlmBackendKind::Codex,
+        llm_fallback_backend: None,
         codex_cli_path: "codex".into(),
         codex_model: None,
         codex_reasoning_effort: None,
