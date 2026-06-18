@@ -57,6 +57,12 @@ services:
       com.centurylinklabs.watchtower.enable: "true"
     env_file:
       - .env
+    environment:
+      # Keep claude's config (incl .claude.json) inside the mounted volume so a
+      # one-time `claude setup-token` login persists across container recreations
+      # (Watchtower updates). claude subscription OAuth copied from the host 401s
+      # headless; an in-container `setup-token` mints a long-lived token instead.
+      CLAUDE_CONFIG_DIR: "/home/bugbot/.claude"
     expose:
       - "8080"
     # Subscription auth (codex/claude login on host) persists across image
@@ -101,6 +107,10 @@ services:
       # Watchtower drives the Docker daemon to pull + recreate containers.
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
+      # containrrr/watchtower's vendored Docker client defaults to API 1.25;
+      # Docker Engine 25+ requires >= 1.40. Pin it so watchtower can talk to
+      # the daemon (it is otherwise unmaintained re: newer engines).
+      DOCKER_API_VERSION: "1.40"
       # Poll GHCR every 5 minutes (lower for faster deploys; raise to be gentle).
       WATCHTOWER_POLL_INTERVAL: "300"
       # Only watch containers labeled watchtower.enable=true (just `bugbot`).

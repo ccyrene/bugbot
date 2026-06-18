@@ -226,6 +226,8 @@ pub struct Settings {
     pub fix_branch_strategy: FixBranchStrategy,
 
     pub log_level: String,
+    /// Hours offset from UTC for log timestamps (e.g. 7 → UTC+7). Default 0 (UTC).
+    pub log_utc_offset_hours: i8,
 }
 
 impl Settings {
@@ -355,6 +357,13 @@ impl Settings {
             )?,
 
             log_level: env_str_or("BUGBOT_LOG_LEVEL", "INFO"),
+            log_utc_offset_hours: match env_opt("BUGBOT_LOG_UTC_OFFSET_HOURS") {
+                None => 0,
+                Some(v) => v.trim().parse::<i8>().map_err(|e| ConfigError::Invalid {
+                    key: "BUGBOT_LOG_UTC_OFFSET_HOURS",
+                    msg: format!("expected an integer hour offset (-23..=23), got {v:?} ({e})"),
+                })?,
+            },
         };
         s.validate()?;
         Ok(s)

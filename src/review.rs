@@ -489,8 +489,22 @@ fn severity_badge(s: Severity) -> &'static str {
     }
 }
 
+/// Footer for inline/grouped comments: the model that produced the review, plus
+/// a HIDDEN idempotency marker (HTML comment — invisible on GitHub, but still
+/// matched by `already_commented_files`).
 fn attribution(name: &str, marker: &str) -> String {
-    format!("_— {name} · `{marker}`_")
+    format!("_— {name}_\n\n<!-- {marker} -->")
+}
+
+/// Footer for the summary comment: model + total token usage + hidden marker.
+fn attribution_usage(name: &str, usage: &TokenUsage, marker: &str) -> String {
+    let toks = usage.compact();
+    let head = if toks.is_empty() {
+        format!("_— {name}_")
+    } else {
+        format!("_— {name} · {toks}_")
+    };
+    format!("{head}\n\n<!-- {marker} -->")
 }
 
 fn format_inline_body(f: &Finding, name: &str, marker: &str, kind: ProviderKind) -> String {
@@ -580,7 +594,7 @@ fn format_summary_body(result: &ReviewResult, name: &str, marker: &str) -> Strin
         };
         return format!(
             "{heading}\n\n{body}\n\n_No findings._\n\n{}",
-            attribution(name, marker)
+            attribution_usage(name, &result.usage, marker)
         );
     }
     let mut by_sev: HashMap<Severity, usize> = HashMap::new();
@@ -626,7 +640,7 @@ fn format_summary_body(result: &ReviewResult, name: &str, marker: &str) -> Strin
         String::new(),
         "Inline comments posted on the specific lines above. Scanner findings (`secret-leak`) are mandatory — rotate before merging.".into(),
         String::new(),
-        attribution(name, marker),
+        attribution_usage(name, &result.usage, marker),
     ]);
     lines.join("\n")
 }
