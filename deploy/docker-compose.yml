@@ -52,7 +52,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-    image: bugbot:0.2.0
+    image: bugbot:0.3.0
     container_name: bugbot
     restart: unless-stopped
     env_file:

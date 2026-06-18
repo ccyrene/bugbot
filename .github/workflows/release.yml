@@ -1,0 +1,148 @@
+name: Release
+
+# Cut a release by pushing a semver tag:
+#
+#   git tag v0.3.0 && git push origin v0.3.0
+#
+# Pipeline: version guard (tag == Cargo.toml) → quality gate (fmt/clippy/test on
+# the exact tagged commit) → build & push the deploy image to GHCR
+# (ghcr.io/<owner>/<repo>). The `latest` tag (which the VM's Watchtower watches)
+# only moves for non-prerelease tags, so `v0.3.0-rc1` publishes `:0.3.0-rc1`
+# without auto-deploying it.
+#
+# Third-party actions are pinned to full commit SHAs (supply-chain hardening),
+# matching ci.yml; the trailing comment records the human-readable version.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing git tag to (re)publish, e.g. v0.3.0"
+        required: true
+
+# Least privilege at the top; the publish job widens to packages:write.
+permissions:
+  contents: read
+
+# Never run two publishes for the same tag at once; never cancel a release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_NET_RETRY: "10"
+  RUSTUP_MAX_RETRIES: "10"
+  RUST_BACKTRACE: "1"
+  REGISTRY: ghcr.io
+
+jobs:
+  # ---- cheap fail-fast: the tag and the crate version must agree ----------
+  guard:
+    name: version guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Tag must equal Cargo.toml version
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          tag="${ref#v}"
+          crate="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/.*"(.*)".*/\1/')"
+          echo "git tag=${tag}  Cargo.toml=${crate}"
+          if [ "${tag}" != "${crate}" ]; then
+            echo "::error::tag v${tag} does not match Cargo.toml version ${crate} — bump Cargo.toml/Cargo.lock before tagging"
+            exit 1
+          fi
+
+  # ---- quality gate on the exact tagged commit (don't ship a red build) ---
+  gate:
+    name: gate (fmt/clippy/test)
+    needs: guard
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+
+  # ---- build the deploy image and push it to GHCR -------------------------
+  publish:
+    name: build & push image
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image tags & labels
+        id: meta
+        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          # `latest` is the moving tag Watchtower follows — only advance it for
+          # final releases (skip it for prereleases like v0.3.0-rc1).
+          tags: |
+            type=semver,pattern={{version}},value=${{ github.event.inputs.tag || github.ref_name }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ github.event.inputs.tag || github.ref_name }}
+            type=sha,format=short
+            type=raw,value=latest,enable=${{ !contains(github.event.inputs.tag || github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=bugbot
+            org.opencontainers.image.description=Self-hosted AI PR reviewer (Rust)
+
+      - name: Build & push
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Reuse the CI buildx cache (the `docker` job in ci.yml warms it).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Single-arch, clean manifest (no provenance/SBOM attestation entries)
+          # so Watchtower's digest comparison stays unambiguous.
+          provenance: false
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published \`${{ github.event.inputs.tag || github.ref_name }}\`"
+            echo ""
+            echo "Image tags pushed to \`${REGISTRY}/${{ github.repository }}\`:"
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "Watchtower on the VM will pull the new \`:latest\` within its poll interval."
+          } >> "$GITHUB_STEP_SUMMARY"
