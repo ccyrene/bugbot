@@ -226,7 +226,8 @@ All settings are env vars prefixed `BUGBOT_` (see
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUGBOT_LLM_BACKEND` | `codex` | `codex` or `claude` |
+| `BUGBOT_LLM_BACKEND` | `codex` | primary backend: `codex` or `claude` |
+| `BUGBOT_LLM_FALLBACK_BACKEND` | — | failover backend on any non-timeout error (e.g. `claude` primary → `codex`); needs auth for both |
 | `BUGBOT_CODEX_CLI_PATH` | `codex` | |
 | `BUGBOT_CODEX_MODEL` | — | unset = codex default (e.g. gpt-5.5) |
 | `BUGBOT_CODEX_REASONING_EFFORT` | — | `low`/`medium`/`high` |

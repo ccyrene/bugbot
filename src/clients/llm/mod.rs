@@ -5,6 +5,7 @@ pub mod claude;
 pub mod codex;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -93,11 +94,42 @@ pub struct LlmResponse {
 pub enum LlmBackend {
     Codex(CodexBackend),
     Claude(ClaudeBackend),
+    /// Try `primary`; on any non-timeout error, retry on `fallback`. Configured
+    /// via `BUGBOT_LLM_BACKEND` + `BUGBOT_LLM_FALLBACK_BACKEND`.
+    Failover {
+        primary: Box<LlmBackend>,
+        fallback: Box<LlmBackend>,
+        /// 0 = primary produced the last response, 1 = fallback. Lets
+        /// `display_name()` attribute to whichever backend actually ran. A
+        /// fresh `LlmBackend` is built per job, so this never races.
+        last_used: AtomicU8,
+    },
+}
+
+/// Whether a primary-backend error should trigger failover to the secondary.
+/// A timeout is deliberately NOT retried (the fallback would just burn another
+/// full timeout window); every other error (quota exhausted, CLI failure,
+/// unsupported mode, …) falls over.
+fn should_failover(err: &LlmError) -> bool {
+    !matches!(err, LlmError::Timeout(..))
 }
 
 impl LlmBackend {
     pub fn from_settings(s: &Settings) -> Result<Self, LlmError> {
-        match s.llm_backend {
+        let primary = Self::build_kind(s.llm_backend, s)?;
+        match s.llm_fallback_backend {
+            Some(fb) if fb != s.llm_backend => Ok(LlmBackend::Failover {
+                primary: Box::new(primary),
+                fallback: Box::new(Self::build_kind(fb, s)?),
+                last_used: AtomicU8::new(0),
+            }),
+            // No fallback, or fallback == primary → single backend.
+            _ => Ok(primary),
+        }
+    }
+
+    fn build_kind(kind: LlmBackendKind, s: &Settings) -> Result<Self, LlmError> {
+        match kind {
             LlmBackendKind::Codex => Ok(LlmBackend::Codex(CodexBackend::new(
                 &s.codex_cli_path,
                 s.codex_model.clone(),
@@ -116,14 +148,46 @@ impl LlmBackend {
         match self {
             LlmBackend::Codex(b) => b.run(req).await,
             LlmBackend::Claude(b) => b.run(req).await,
+            LlmBackend::Failover {
+                primary,
+                fallback,
+                last_used,
+            } => match Box::pin(primary.run(req)).await {
+                Ok(resp) => {
+                    last_used.store(0, Ordering::Relaxed);
+                    Ok(resp)
+                }
+                Err(e) if should_failover(&e) => {
+                    tracing::warn!(
+                        "primary LLM ({}) failed: {e}; failing over to {}",
+                        primary.display_name(),
+                        fallback.display_name()
+                    );
+                    last_used.store(1, Ordering::Relaxed);
+                    Box::pin(fallback.run(req)).await
+                }
+                Err(e) => Err(e),
+            },
         }
     }
 
-    /// Human-readable reviewer name for the attribution footer.
+    /// Human-readable reviewer name for the attribution footer. For a failover
+    /// backend this reflects whichever backend produced the last response.
     pub fn display_name(&self) -> String {
         match self {
             LlmBackend::Codex(b) => b.display_name(),
             LlmBackend::Claude(b) => b.display_name(),
+            LlmBackend::Failover {
+                primary,
+                fallback,
+                last_used,
+            } => {
+                if last_used.load(Ordering::Relaxed) == 0 {
+                    primary.display_name()
+                } else {
+                    fallback.display_name()
+                }
+            }
         }
     }
 }
@@ -202,4 +266,32 @@ pub(crate) async fn run_cli(
 /// First `u64` found among `keys` in object `v`.
 pub(crate) fn get_u64(v: &Value, keys: &[&str]) -> Option<u64> {
     keys.iter().find_map(|k| v.get(*k).and_then(Value::as_u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failover_triggers_on_every_error_except_timeout() {
+        // Timeout must NOT fail over (avoid burning a second full window).
+        assert!(!should_failover(&LlmError::Timeout("claude", 600)));
+        // Everything else does (quota/exit-nonzero, empty, unsupported, missing CLI).
+        assert!(should_failover(&LlmError::NonZero {
+            backend: "claude",
+            code: 1,
+            stderr: "usage limit reached".into(),
+        }));
+        assert!(should_failover(&LlmError::Unsupported(
+            "fix needs codex".into()
+        )));
+        assert!(should_failover(&LlmError::EmptyOutput {
+            backend: "claude",
+            detail: "no json".into(),
+        }));
+        assert!(should_failover(&LlmError::CliNotFound(
+            "claude",
+            "missing".into()
+        )));
+    }
 }
