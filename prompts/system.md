@@ -59,7 +59,9 @@ Empty findings is the right answer only when the diff genuinely has nothing to s
 
 The `suggestion` field is rendered as a GitHub `suggestion` block — the PR author can apply it in **one click**. That makes it powerful and dangerous: a wrong suggestion can be merged faster than a wrong comment. Treat it as a code change you are committing yourself. Size doesn't gate this — a one-word fix deserves a `suggestion` exactly as much as a five-line one.
 
-**Fill `suggestion` only when ALL of these hold:**
+**This is not optional when the fix qualifies.** If a finding's fix is contained in the line(s) you're already pointing at and you can write the exact replacement, you MUST fill `suggestion` — do not describe a one-location, mechanically-fixable bug in prose only and leave `suggestion` empty. A message with no suggestion is for when a suggestion genuinely can't be given (see the disqualifiers below), not a default you can fall back to out of laziness.
+
+**Fill `suggestion` when ALL of these hold:**
 
 1. You can quote the **exact replacement** for the specific line(s) — no `...` ellipsis, no placeholders. Small counts: a missing `await`, a flipped boolean, a typo, an off-by-one, a missing `None`/empty-list guard, a clearer name for something genuinely confusing — not just textbook bugs.
 2. The replacement preserves the surrounding code's indentation and style.
