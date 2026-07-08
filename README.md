@@ -17,8 +17,8 @@ the PR branch).
 Enable either provider or both — each has its own webhook endpoint, IP
 allowlist, and HMAC secret.
 
-> **This is the Rust rewrite (v0.2).** The original Python implementation is
-> preserved under [`legacy/`](legacy/) for reference.
+> **This is the Rust rewrite.** (The original Python implementation lives in git
+> history prior to the rewrite.)
 
 ---
 
@@ -111,7 +111,18 @@ docker compose logs -f bugbot caddy
 
 Register webhooks:
 
-- **GitHub** → repo/org **Settings → Webhooks → Add webhook**
+- **GitHub — option A: GitHub App** (preferred — own `[bot]` identity + short-lived
+  auto-rotating installation tokens). **Settings → Developer settings → GitHub Apps → New**:
+  - Webhook URL `https://<host>/webhook/github` (or `…/webhook/github/<domain>`),
+    secret `BUGBOT_GITHUB_WEBHOOK_SECRET`
+  - Repository permissions: **Contents: R&W**, **Issues: R&W**, **Pull requests: R&W**, Metadata: R
+    (Issues R&W is required for the **Issue comment** event + posting top-level PR comments)
+    (Contents *Read* is enough without `@bugbot fix`)
+  - Subscribe to: **Pull request**, **Issue comment**, **Pull request review comment**
+  - Generate a private key (`.pem`), note the **App ID**, then **install** it on your repos.
+  - Set `BUGBOT_GITHUB_APP_ID`, `BUGBOT_GITHUB_APP_PRIVATE_KEY[_PATH]`, and
+    `BUGBOT_GITHUB_BOT_LOGIN=<app-slug>[bot]`.
+- **GitHub — option B: PAT** → repo/org **Settings → Webhooks → Add webhook**
   - Payload URL: `https://<host>/webhook/github` (or `…/webhook/github/<domain>`)
   - Content type: `application/json`, Secret: `BUGBOT_GITHUB_WEBHOOK_SECRET`
   - Events: **Pull requests**, **Issue comments**, **Pull request review comments**
@@ -120,6 +131,52 @@ Register webhooks:
 - **Bitbucket** → repo **Settings → Webhooks**
   - URL: `https://<host>/webhook/bitbucket`, Secret: `BUGBOT_WEBHOOK_SECRET`
   - Trigger: Pull request → Created and Updated
+
+---
+
+## Releases & continuous deployment
+
+Pull-based CD: a tagged release builds an image, pushes it to GHCR, and the VM's
+**Watchtower** sidecar pulls it automatically. No SSH key in CI, no inbound
+access to the VM, no registry credentials (the image is public).
+
+```
+git tag v0.3.0 && git push origin v0.3.0
+        │
+        ▼  .github/workflows/release.yml
+  version guard (tag == Cargo.toml)  →  gate (fmt/clippy/test)  →  build & push
+        │
+        ▼  ghcr.io/ccyrene/bugbot:0.3.0  +  :0.3  +  :sha-xxxx  +  :latest
+        │
+        ▼  Watchtower on the VM (polls every 5 min) pulls :latest → recreates bugbot
+```
+
+**Cut a release**
+
+1. Bump `version` in `Cargo.toml` (and refresh `Cargo.lock`), merge to green `main`.
+2. `git tag vX.Y.Z && git push origin vX.Y.Z` — the tag must equal the crate version
+   or the workflow fails fast. (`vX.Y.Z-rc1` publishes `:X.Y.Z-rc1` but does **not**
+   move `:latest`, so prereleases never auto-deploy.)
+3. The `Release` workflow publishes to `ghcr.io/<owner>/<repo>`. **One-time:** after the
+   first publish, set the GHCR package visibility to **Public** (repo → Packages → the
+   package → Package settings → Change visibility) so the VM can pull without auth.
+
+**Deploy target (VM)** — use the production compose, which pulls the image and runs
+Watchtower instead of building locally:
+
+```bash
+cd deploy
+cp .env.example .env           && $EDITOR .env
+cp Caddyfile.example Caddyfile && $EDITOR Caddyfile
+docker compose -f docker-compose.prod.yml up -d
+docker compose -f docker-compose.prod.yml logs -f bugbot watchtower
+```
+
+Watchtower auto-updates only the `bugbot` container (it carries the
+`com.centurylinklabs.watchtower.enable` label; `caddy` is left alone). Pin a version
+to opt out of auto-tracking: `BUGBOT_IMAGE_TAG=0.3.0 docker compose -f
+docker-compose.prod.yml up -d`. The plain `docker-compose.yml` remains the
+local **build-from-source** path for development.
 
 ---
 
@@ -170,19 +227,23 @@ All settings are env vars prefixed `BUGBOT_` (see
 
 | Variable | Default | Notes |
 |---|---|---|
-| `BUGBOT_LLM_BACKEND` | `codex` | `codex` or `claude` |
+| `BUGBOT_LLM_BACKEND` | `codex` | primary backend: `codex` or `claude` |
+| `BUGBOT_LLM_FALLBACK_BACKEND` | — | failover backend on any non-timeout error (e.g. `claude` primary → `codex`); needs auth for both |
 | `BUGBOT_CODEX_CLI_PATH` | `codex` | |
 | `BUGBOT_CODEX_MODEL` | — | unset = codex default (e.g. gpt-5.5) |
 | `BUGBOT_CODEX_REASONING_EFFORT` | — | `low`/`medium`/`high` |
 | `BUGBOT_CODEX_TIMEOUT_SECONDS` | `900` | per-call hard timeout (codex has none of its own) |
 | `OPENAI_API_KEY` | — | codex Path A (XOR mount `~/.codex`) |
-| `BUGBOT_CLAUDE_MODEL` | `sonnet` | claude backend only |
+| `BUGBOT_CLAUDE_MODEL` | `claude-sonnet-5` | claude backend only |
 | `ANTHROPIC_API_KEY` | — | claude Path A (XOR mount `~/.claude`) |
 | `BUGBOT_BITBUCKET_APP_PASSWORD` | — | enables Bitbucket (alias `BITBUCKET_TOKEN`) |
 | `BUGBOT_WEBHOOK_SECRET` | — | required iff Bitbucket enabled |
-| `BUGBOT_GITHUB_TOKEN` | — | enables GitHub (alias `GITHUB_TOKEN`) |
+| `BUGBOT_GITHUB_APP_ID` | — | enables GitHub **App** auth (preferred); numeric App ID |
+| `BUGBOT_GITHUB_APP_PRIVATE_KEY` | — | App private key PEM (or use `…_PATH`) |
+| `BUGBOT_GITHUB_APP_PRIVATE_KEY_PATH` | — | path to the App `.pem` (takes precedence over inline) |
+| `BUGBOT_GITHUB_TOKEN` | — | enables GitHub via PAT (fallback; alias `GITHUB_TOKEN`) |
 | `BUGBOT_GITHUB_WEBHOOK_SECRET` | — | required iff GitHub enabled |
-| `BUGBOT_GITHUB_BOT_LOGIN` | auto | login that counts as "us" (auto-detected via `GET /user`) |
+| `BUGBOT_GITHUB_BOT_LOGIN` | auto | login that counts as "us"; **required** for App+interactive (PAT: auto via `GET /user`) |
 | `BUGBOT_INTERACTIVE_ENABLED` | `true` | handle comment events (Q&A + commands) |
 | `BUGBOT_FIX_ENABLED` | `true` | allow `@bugbot fix` (needs codex + Contents:write) |
 | `BUGBOT_FIX_MAX_PER_PR_24H` | `3` | autofix loop guard |
@@ -193,6 +254,7 @@ All settings are env vars prefixed `BUGBOT_` (see
 | `BUGBOT_GIT_CLONE_MAX_MB` | `512` | reject clones above this |
 | `BUGBOT_WEBHOOK_ENFORCE_IP_ALLOWLIST` | `true` | Atlassian + GitHub `/meta` ranges |
 | `BUGBOT_DRY_RUN` | `false` | log comments instead of posting |
+| `BUGBOT_LOG_UTC_OFFSET_HOURS` | `0` | log timestamp offset from UTC (e.g. `7` = UTC+7) |
 | `BUGBOT_DEFAULT_DOMAIN` | `general` | focus when a bare webhook path is used |
 
 At least one provider must be configured, and each enabled provider needs its
@@ -285,7 +347,6 @@ bugbot/
 ├── deploy/                docker-compose, Caddyfile, .env.example
 ├── Dockerfile             cargo-chef build + Node + codex/claude CLIs
 ├── tests/                 webhook integration tests
-├── legacy/                the original Python implementation (reference)
 └── Cargo.toml
 ```
 

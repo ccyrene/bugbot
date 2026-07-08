@@ -9,7 +9,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 
 use bugbot::clients::bitbucket::BitbucketClient;
-use bugbot::clients::github::GitHubClient;
+use bugbot::clients::github_app::{self, AppAuth};
 use bugbot::clients::llm::LlmBackend;
 use bugbot::clients::provider::Provider;
 use bugbot::config::{Settings, Severity};
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
 
 async fn cmd_serve(host: Option<String>, port: Option<u16>) -> Result<()> {
     let settings = Settings::load().context("loading settings")?;
-    logging::init(&settings.log_level);
+    logging::init(&settings.log_level, settings.log_utc_offset_hours);
     let host = host.unwrap_or_else(|| settings.server_host.clone());
     let port = port.unwrap_or(settings.server_port);
 
@@ -106,7 +106,7 @@ async fn cmd_serve(host: Option<String>, port: Option<u16>) -> Result<()> {
         settings.interactive_enabled,
     );
 
-    let app = create_app(Arc::new(settings));
+    let app = create_app(Arc::new(settings))?;
     let listener = tokio::net::TcpListener::bind((host.as_str(), port))
         .await
         .with_context(|| format!("binding {host}:{port}"))?;
@@ -151,7 +151,7 @@ async fn cmd_review_pr(
     artifact: Option<PathBuf>,
 ) -> Result<()> {
     let settings = Settings::load().context("loading settings")?;
-    logging::init(&settings.log_level);
+    logging::init(&settings.log_level, settings.log_utc_offset_hours);
     let provider_norm = provider.trim().to_lowercase();
 
     let prov = match provider_norm.as_str() {
@@ -169,17 +169,18 @@ async fn cmd_review_pr(
             )?)
         }
         "github" => {
-            let tok = settings
-                .github_token
-                .as_ref()
-                .context("GitHub not configured — set BUGBOT_GITHUB_TOKEN")?;
-            Provider::GitHub(GitHubClient::new(
-                tok.expose(),
+            // App auth when configured (resolves the installation from the
+            // repo, since there's no webhook to carry it), else static PAT.
+            let app_auth = AppAuth::from_settings(&settings)?;
+            let gh = github_app::build_github_client(
+                &settings,
+                app_auth.as_deref(),
                 &workspace,
                 &repo_slug,
-                &settings.github_base_url,
-                settings.github_timeout_seconds,
-            )?)
+                None,
+            )
+            .await?;
+            Provider::GitHub(gh)
         }
         other => anyhow::bail!("--provider must be 'bitbucket' or 'github', got {other:?}"),
     };
@@ -206,7 +207,7 @@ async fn cmd_review_pr(
 }
 
 fn cmd_scan(diff_path: PathBuf, fail_on: &str, output: Option<PathBuf>) -> Result<()> {
-    logging::init("INFO");
+    logging::init("INFO", 0);
     let text = std::fs::read_to_string(&diff_path)
         .with_context(|| format!("reading {}", diff_path.display()))?;
     let files = parse_unified_diff(&text);

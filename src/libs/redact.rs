@@ -13,6 +13,10 @@ static PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     let raw: &[(&str, &str)] = &[
         (r"AKIA[0-9A-Z]{16}", "AKIA****REDACTED****"),
         (r"ghp_[A-Za-z0-9]{30,}", "ghp_****REDACTED****"),
+        // GitHub App installation token (what the App-auth path mints) …
+        (r"ghs_[A-Za-z0-9]{30,}", "ghs_****REDACTED****"),
+        // … and the remaining GitHub token families (oauth / user / refresh).
+        (r"gh[our]_[A-Za-z0-9]{30,}", "gh*_****REDACTED****"),
         (
             r"github_pat_[A-Za-z0-9_]{40,}",
             "github_pat_****REDACTED****",
@@ -58,6 +62,11 @@ mod tests {
     fn masks_cloud_and_vcs_keys() {
         assert!(redact("AKIAABCDEFGHIJKLMNOP").contains("AKIA****REDACTED****"));
         assert!(redact(&format!("ghp_{}", "a".repeat(36))).contains("ghp_****REDACTED****"));
+        // GitHub App installation token + sibling families.
+        let ghs = format!("ghs_{}", "b".repeat(36));
+        assert!(redact(&ghs).contains("ghs_****REDACTED****"));
+        assert!(!redact(&ghs).contains(&"b".repeat(36)));
+        assert!(redact(&format!("gho_{}", "c".repeat(36))).contains("gh*_****REDACTED****"));
     }
 
     #[test]

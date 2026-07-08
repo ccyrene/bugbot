@@ -1,0 +1,140 @@
+# =====================================================================
+# bugbot — PRODUCTION compose for the VM (pull a prebuilt image; no build).
+#
+# Difference vs docker-compose.yml: the `bugbot` service PULLS
+# ghcr.io/ccyrene/bugbot instead of building locally, and a `watchtower`
+# sidecar polls GHCR and auto-pulls + recreates bugbot when a new `:latest`
+# is published by the Release workflow (.github/workflows/release.yml).
+#
+# Flow:  git tag v0.3.0 → GitHub Actions builds & pushes ghcr.io/ccyrene/bugbot
+#        :0.3.0 + :latest → Watchtower (here) pulls :latest within its poll
+#        interval → recreates `bugbot` with the new image. Zero inbound access,
+#        no SSH key, no registry creds (the image is PUBLIC on GHCR).
+#
+# Quickstart on the VM:
+#   cd deploy
+#   cp .env.example .env            && $EDITOR .env
+#   cp Caddyfile.example Caddyfile  && $EDITOR Caddyfile
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml logs -f bugbot watchtower
+#
+# Pin a specific version instead of auto-tracking latest (disables auto-deploy
+# for bugbot — Watchtower won't move you off a pinned tag):
+#   BUGBOT_IMAGE_TAG=0.3.0 docker compose -f docker-compose.prod.yml up -d
+# =====================================================================
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: bugbot-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - bugbot_net
+    depends_on:
+      - bugbot
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  bugbot:
+    image: ghcr.io/ccyrene/bugbot:${BUGBOT_IMAGE_TAG:-latest}
+    container_name: bugbot
+    restart: unless-stopped
+    # Only containers carrying this label are auto-updated (see watchtower's
+    # WATCHTOWER_LABEL_ENABLE). caddy is intentionally NOT auto-updated.
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+    env_file:
+      - .env
+    environment:
+      # Keep claude's config (incl .claude.json) inside the mounted volume so a
+      # one-time `claude setup-token` login persists across container recreations
+      # (Watchtower updates). claude subscription OAuth copied from the host 401s
+      # headless; an in-container `setup-token` mints a long-lived token instead.
+      CLAUDE_CONFIG_DIR: "/home/bugbot/.claude"
+    expose:
+      - "8080"
+    # Subscription auth (codex/claude login on host) persists across image
+    # updates via this named volume. To use host-mounted auth instead, swap to
+    # the bind-mount form (and keep it read-WRITE — the CLIs refresh tokens).
+    volumes:
+      - codex_state:/home/bugbot/.codex
+      # Claude auth — needed when claude is the (primary or fallback) backend.
+      - claude_state:/home/bugbot/.claude
+      # Or bind-mount host auth instead of the seeded named volumes:
+      # - /home/ubuntu/.codex:/home/bugbot/.codex
+      # - /home/ubuntu/.claude:/home/bugbot/.claude
+    networks:
+      - bugbot_net
+    tmpfs:
+      - /tmp:size=1g,mode=1777,exec
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+          cpus: "2.0"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Pull-based CD: polls GHCR and recreates labeled containers on a new image.
+  watchtower:
+    image: containrrr/watchtower:1.7.1
+    container_name: bugbot-watchtower
+    restart: unless-stopped
+    volumes:
+      # Watchtower drives the Docker daemon to pull + recreate containers.
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      # containrrr/watchtower's vendored Docker client defaults to API 1.25;
+      # Docker Engine 25+ requires >= 1.40. Pin it so watchtower can talk to
+      # the daemon (it is otherwise unmaintained re: newer engines).
+      DOCKER_API_VERSION: "1.40"
+      # Poll GHCR every 5 minutes (lower for faster deploys; raise to be gentle).
+      WATCHTOWER_POLL_INTERVAL: "300"
+      # Only watch containers labeled watchtower.enable=true (just `bugbot`).
+      WATCHTOWER_LABEL_ENABLE: "true"
+      # Delete the superseded image after a successful update.
+      WATCHTOWER_CLEANUP: "true"
+      WATCHTOWER_ROLLING_RESTART: "true"
+      WATCHTOWER_INCLUDE_RESTARTING: "true"
+      WATCHTOWER_NO_STARTUP_MESSAGE: "true"
+      TZ: "UTC"
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  caddy_data:
+  caddy_config:
+  codex_state:
+  claude_state:
+
+networks:
+  bugbot_net:
+    driver: bridge

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Semaphore;
 
 use crate::clients::bitbucket::BitbucketClient;
-use crate::clients::github::GitHubClient;
+use crate::clients::github_app::{self, AppAuth};
 use crate::clients::llm::LlmBackend;
 use crate::clients::provider::{Provider, ProviderKind};
 use crate::config::Settings;
@@ -24,6 +24,8 @@ pub struct ReviewJob {
     pub repo_slug: String,
     pub pr_id: u64,
     pub domain: String,
+    /// GitHub App installation id (GitHub jobs only); `None` under PAT auth.
+    pub installation_id: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,18 +77,24 @@ pub struct Worker {
     sem: Arc<Semaphore>,
     inflight: Arc<Mutex<HashSet<String>>>,
     fix_limiter: Arc<FixLimiter>,
+    /// Present when the GitHub App is configured; `None` → static PAT auth.
+    app_auth: Option<Arc<AppAuth>>,
 }
 
 impl Worker {
-    pub fn new(settings: Arc<Settings>) -> Self {
+    /// Fallible because building the App auth validates the private key — a
+    /// misconfigured App should fail at startup, not on the first webhook.
+    pub fn new(settings: Arc<Settings>) -> anyhow::Result<Self> {
         let max = settings.max_concurrent_reviews.max(1);
         let fix_max = settings.fix_max_per_pr_24h;
-        Worker {
+        let app_auth = AppAuth::from_settings(&settings)?;
+        Ok(Worker {
             settings,
             sem: Arc::new(Semaphore::new(max)),
             inflight: Arc::new(Mutex::new(HashSet::new())),
             fix_limiter: Arc::new(FixLimiter::new(fix_max)),
-        }
+            app_auth,
+        })
     }
 
     /// Enqueue a job. Returns false if the same job is already in-flight.
@@ -105,6 +113,7 @@ impl Worker {
         let sem = Arc::clone(&self.sem);
         let inflight = Arc::clone(&self.inflight);
         let fix_limiter = Arc::clone(&self.fix_limiter);
+        let app_auth = self.app_auth.clone();
 
         tokio::spawn(async move {
             let _guard = InflightGuard {
@@ -112,7 +121,7 @@ impl Worker {
                 key: key.clone(),
             };
             let _permit = sem.acquire_owned().await; // bound concurrency
-            if let Err(e) = run_job(&settings, &fix_limiter, job).await {
+            if let Err(e) = run_job(&settings, &fix_limiter, app_auth.as_deref(), job).await {
                 tracing::error!("job {key} failed: {e:#}");
             }
         });
@@ -120,7 +129,12 @@ impl Worker {
     }
 }
 
-async fn run_job(settings: &Settings, fix_limiter: &FixLimiter, job: Job) -> anyhow::Result<()> {
+async fn run_job(
+    settings: &Settings,
+    fix_limiter: &FixLimiter,
+    app_auth: Option<&AppAuth>,
+    job: Job,
+) -> anyhow::Result<()> {
     let llm = LlmBackend::from_settings(settings)?;
     match job {
         Job::Review(rj) => {
@@ -132,20 +146,31 @@ async fn run_job(settings: &Settings, fix_limiter: &FixLimiter, job: Job) -> any
                 rj.pr_id,
                 rj.domain
             );
-            let provider = build_provider(settings, &rj)?;
+            let provider = build_provider(settings, app_auth, &rj).await?;
             Reviewer::new(settings, &provider, &llm)
                 .run(rj.pr_id, &rj.domain)
                 .await?;
         }
         Job::Interact(comment) => {
-            let gh = build_github(settings, &comment.workspace, &comment.repo_slug)?;
+            let gh = github_app::build_github_client(
+                settings,
+                app_auth,
+                &comment.workspace,
+                &comment.repo_slug,
+                comment.installation_id,
+            )
+            .await?;
             interactive::handle_comment(settings, gh, &llm, &comment, fix_limiter).await?;
         }
     }
     Ok(())
 }
 
-fn build_provider(s: &Settings, rj: &ReviewJob) -> Result<Provider, WorkerError> {
+async fn build_provider(
+    s: &Settings,
+    app_auth: Option<&AppAuth>,
+    rj: &ReviewJob,
+) -> Result<Provider, WorkerError> {
     match rj.provider {
         ProviderKind::Bitbucket => {
             let pw = s.bitbucket_app_password.as_ref().ok_or_else(|| {
@@ -162,25 +187,17 @@ fn build_provider(s: &Settings, rj: &ReviewJob) -> Result<Provider, WorkerError>
             .map_err(|e| WorkerError::Config(e.to_string()))?;
             Ok(Provider::Bitbucket(c))
         }
-        ProviderKind::GitHub => Ok(Provider::GitHub(build_github(
-            s,
-            &rj.workspace,
-            &rj.repo_slug,
-        )?)),
+        ProviderKind::GitHub => {
+            let gh = github_app::build_github_client(
+                s,
+                app_auth,
+                &rj.workspace,
+                &rj.repo_slug,
+                rj.installation_id,
+            )
+            .await
+            .map_err(|e| WorkerError::Config(e.to_string()))?;
+            Ok(Provider::GitHub(gh))
+        }
     }
-}
-
-fn build_github(s: &Settings, owner: &str, repo: &str) -> Result<GitHubClient, WorkerError> {
-    let tok = s
-        .github_token
-        .as_ref()
-        .ok_or_else(|| WorkerError::Config("GitHub job but BUGBOT_GITHUB_TOKEN unset".into()))?;
-    GitHubClient::new(
-        tok.expose(),
-        owner,
-        repo,
-        &s.github_base_url,
-        s.github_timeout_seconds,
-    )
-    .map_err(|e| WorkerError::Config(e.to_string()))
 }

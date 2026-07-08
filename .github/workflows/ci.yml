@@ -88,16 +88,17 @@ jobs:
         run: cargo build --release --locked --bin bugbot
 
   msrv:
-    name: msrv (1.86)
+    name: msrv (1.88)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      # Must match `rust-version` in Cargo.toml. The effective floor is 1.86
-      # (pulled up by icu_normalizer 2.2.0 via reqwest -> url -> idna).
+      # Must match `rust-version` in Cargo.toml. The effective floor is 1.88
+      # (pulled up by jsonwebtoken -> simple_asn1 -> time 0.3.47; previously
+      # 1.86 via icu_normalizer 2.2.0 -> reqwest -> url -> idna).
       - uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
         with:
-          toolchain: "1.86"
+          toolchain: "1.88"
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       # MSRV covers the shipped artifact (lib + bin), NOT --all-targets: the
       # dev-dependency wiremock 0.6.5 uses let-chains and needs rustc >= 1.88,

@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use crate::clients::github::{GitHubClient, ReviewComment};
-use crate::clients::llm::{LlmBackend, LlmMode, LlmRequest};
+use crate::clients::llm::{LlmBackend, LlmMode, LlmRequest, TokenUsage};
 use crate::clients::provider::Provider;
 use crate::config::{FixBranchStrategy, Settings};
 use crate::libs::redact::redact;
@@ -81,11 +81,20 @@ fn parse_command(body: &str, is_reply_to_bot: bool, bot_login: &str) -> Command 
     if lower.contains("bugbot run") || lower.contains("cursor review") {
         return Command::Review;
     }
-    // @bugbot <verb> [rest], or @<bot_login> <verb> [rest]
+    // @bugbot <verb>, @<bot_login> <verb> (e.g. @himari-ai[bot]), or the bare
+    // slug @himari-ai (bot_login with the [bot] suffix stripped). bot_login is
+    // listed before the bare slug so the longer alternative matches first.
+    let bare = bot_login.strip_suffix("[bot]").unwrap_or(bot_login);
     let alt = if bot_login.is_empty() {
         "bugbot".to_string()
-    } else {
+    } else if bare == bot_login {
         format!("bugbot|{}", regex::escape(bot_login))
+    } else {
+        format!(
+            "bugbot|{}|{}",
+            regex::escape(bot_login),
+            regex::escape(bare)
+        )
     };
     if let Ok(re) = regex::Regex::new(&format!(r"(?i)@(?:{alt})\s+([a-zA-Z]+)[ \t]*(.*)")) {
         if let Some(c) = re.captures(body) {
@@ -103,7 +112,9 @@ fn parse_command(body: &str, is_reply_to_bot: bool, bot_login: &str) -> Command 
         }
     }
     let mentioned = lower.contains("@bugbot")
-        || (!bot_login.is_empty() && lower.contains(&format!("@{}", bot_login.to_lowercase())));
+        || (!bot_login.is_empty()
+            && (lower.contains(&format!("@{}", bot_login.to_lowercase()))
+                || lower.contains(&format!("@{}", bare.to_lowercase()))));
     if mentioned || is_reply_to_bot {
         return Command::Converse;
     }
@@ -248,8 +259,16 @@ async fn post_reply(
     Ok(())
 }
 
-fn attribution(llm: &LlmBackend, marker: &str) -> String {
-    format!("\n\n_— {} · `{}`_", llm.display_name(), marker)
+fn attribution(llm: &LlmBackend, usage: &TokenUsage, marker: &str) -> String {
+    let toks = usage.compact();
+    let head = if toks.is_empty() {
+        format!("_— {}_", llm.display_name())
+    } else {
+        format!("_— {} · {}_", llm.display_name(), toks)
+    };
+    // `marker` is kept as a HIDDEN HTML comment (invisible on GitHub) so
+    // reply/idempotency detection still works without the visible `bugbot:v1`.
+    format!("\n\n{head}\n\n<!-- {marker} -->")
 }
 
 async fn handle_converse(
@@ -316,16 +335,23 @@ async fn handle_converse(
         timeout: Duration::from_secs_f64(s.codex_timeout_seconds.max(s.claude_timeout_seconds)),
     };
 
-    let reply = match llm.run(&req).await {
-        Ok(r) => r.content,
+    let (reply, usage) = match llm.run(&req).await {
+        Ok(r) => (r.content, r.usage),
         Err(e) => {
             tracing::error!("converse LLM failed: {e}");
-            "I hit an error trying to answer that — please try again.".to_string()
+            (
+                "I hit an error trying to answer that — please try again.".to_string(),
+                TokenUsage::default(),
+            )
         }
     };
     drop(clone);
 
-    let body = format!("{}{}", reply.trim(), attribution(llm, &s.bot_marker));
+    let body = format!(
+        "{}{}",
+        reply.trim(),
+        attribution(llm, &usage, &s.bot_marker)
+    );
     post_reply(gh, c, thread.as_ref().map(|(r, _)| *r), &body).await
 }
 
@@ -421,8 +447,8 @@ async fn handle_fix(
         output_schema: None,
         timeout: Duration::from_secs_f64(s.codex_timeout_seconds),
     };
-    let model_msg = match llm.run(&req).await {
-        Ok(r) => r.content,
+    let (model_msg, usage) = match llm.run(&req).await {
+        Ok(r) => (r.content, r.usage),
         Err(e) => {
             tracing::error!("fix LLM failed: {e}");
             drop(clone);
@@ -445,7 +471,7 @@ async fn handle_fix(
         let body = format!(
             "No changes were necessary.\n\n{}{}",
             model_msg.trim(),
-            attribution(llm, &s.bot_marker)
+            attribution(llm, &usage, &s.bot_marker)
         );
         return post_reply(gh, c, root, &body).await;
     }
@@ -459,7 +485,7 @@ async fn handle_fix(
             "✅ Pushed a fix to `{}`.\n\n{}{}",
             pr.source_branch,
             model_msg.trim(),
-            attribution(llm, &s.bot_marker)
+            attribution(llm, &usage, &s.bot_marker)
         ),
         Ok(PushOutcome::NewBranch { branch }) => {
             // Open a PR from the fix branch into the PR's source branch.
@@ -477,12 +503,12 @@ async fn handle_fix(
                     "✅ Opened fix PR [#{num}]({url}) targeting `{}`.\n\n{}{}",
                     pr.source_branch,
                     model_msg.trim(),
-                    attribution(llm, &s.bot_marker)
+                    attribution(llm, &usage, &s.bot_marker)
                 ),
                 Err(e) => format!(
                     "I pushed the fix to `{branch}` but couldn't open a PR: {e}\n\n{}{}",
                     model_msg.trim(),
-                    attribution(llm, &s.bot_marker)
+                    attribution(llm, &usage, &s.bot_marker)
                 ),
             }
         }
@@ -491,7 +517,7 @@ async fn handle_fix(
             format!(
                 "I made the changes but couldn't push them: {e}\n\n{}{}",
                 model_msg.trim(),
-                attribution(llm, &s.bot_marker)
+                attribution(llm, &usage, &s.bot_marker)
             )
         }
     };
@@ -642,6 +668,30 @@ mod tests {
     #[test]
     fn parse_help() {
         assert_eq!(parse_command("@bugbot help", false, ""), Command::Help);
+    }
+
+    #[test]
+    fn parse_accepts_bare_slug_and_bot_login_and_bugbot() {
+        // bot_login = himari-ai[bot]: full login, bare slug, and @bugbot all work.
+        let bl = "himari-ai[bot]";
+        assert_eq!(
+            parse_command("@himari-ai[bot] review", false, bl),
+            Command::Review
+        );
+        assert_eq!(
+            parse_command("@himari-ai review", false, bl),
+            Command::Review
+        );
+        assert_eq!(parse_command("@bugbot review", false, bl), Command::Review);
+        assert_eq!(
+            parse_command("@himari-ai fix the off-by-one", false, bl),
+            Command::Fix(Some("the off-by-one".to_string()))
+        );
+        // bare mention without a verb → Converse
+        assert_eq!(
+            parse_command("hey @himari-ai what about null?", false, bl),
+            Command::Converse
+        );
     }
 
     #[tokio::test]

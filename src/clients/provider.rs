@@ -150,4 +150,24 @@ impl Provider {
         };
         Ok(())
     }
+
+    /// GitHub Checks API — surfaces the review as a pass/fail check alongside
+    /// CI, not just a comment. No-op on Bitbucket (no equivalent API there).
+    pub async fn create_check_run(
+        &self,
+        head_sha: &str,
+        name: &str,
+        conclusion: &str,
+        title: &str,
+        summary: &str,
+    ) -> anyhow::Result<()> {
+        match self {
+            Provider::Bitbucket(_) => Ok(()),
+            Provider::GitHub(c) => {
+                c.create_check_run(head_sha, name, conclusion, title, summary)
+                    .await?;
+                Ok(())
+            }
+        }
+    }
 }

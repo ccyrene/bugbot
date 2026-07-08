@@ -140,7 +140,13 @@ pub enum ConfigError {
 #[derive(Debug, Clone)]
 pub struct Settings {
     // ---- LLM backend ----
+    /// Primary backend.
     pub llm_backend: LlmBackendKind,
+    /// Optional failover backend: when the primary returns *any* error other
+    /// than a timeout (quota exhausted, CLI error, unsupported mode, …), the
+    /// request is retried on this backend. `None` → no failover (single
+    /// backend, the historical behaviour). Ignored when equal to `llm_backend`.
+    pub llm_fallback_backend: Option<LlmBackendKind>,
 
     // codex exec
     pub codex_cli_path: String,
@@ -164,13 +170,26 @@ pub struct Settings {
     pub bitbucket_timeout_seconds: f64,
 
     // ---- GitHub ----
+    /// Static Personal Access Token (PAT) auth. Optional fallback when the
+    /// GitHub App is not configured.
     pub github_token: Option<Secret>,
+    /// GitHub App numeric App ID — enables installation-token auth (preferred
+    /// over the PAT: own `[bot]` identity + short-lived auto-rotating tokens).
+    pub github_app_id: Option<String>,
+    /// GitHub App private key in PEM form (signs the App JWT). Mutually
+    /// exclusive in practice with [`github_app_private_key_path`].
+    pub github_app_private_key: Option<Secret>,
+    /// Path to the GitHub App private-key `.pem` (cleaner for Docker secrets
+    /// than stuffing a multiline PEM into an env var). Takes precedence over
+    /// the inline key when both are set.
+    pub github_app_private_key_path: Option<String>,
     pub github_webhook_secret: Option<Secret>,
     pub github_base_url: String,
     pub github_timeout_seconds: f64,
     pub github_webhook_path: String,
     /// Login of the account/app whose comments count as "ours" for
-    /// reply-to-bot detection. Auto-detected via `GET /user` when unset.
+    /// reply-to-bot detection. Auto-detected via `GET /user` for PAT auth;
+    /// **required** for App auth (installation tokens can't call `GET /user`).
     pub github_bot_login: Option<String>,
 
     // ---- git clone ----
@@ -207,6 +226,8 @@ pub struct Settings {
     pub fix_branch_strategy: FixBranchStrategy,
 
     pub log_level: String,
+    /// Hours offset from UTC for log timestamps (e.g. 7 → UTC+7). Default 0 (UTC).
+    pub log_utc_offset_hours: i8,
 }
 
 impl Settings {
@@ -215,7 +236,15 @@ impl Settings {
     }
 
     pub fn github_enabled(&self) -> bool {
-        self.github_token.is_some()
+        self.github_token.is_some() || self.github_app_enabled()
+    }
+
+    /// True when GitHub App credentials are present (App ID + a private key
+    /// from either the inline value or a file path). When enabled, this auth
+    /// path takes precedence over the static PAT.
+    pub fn github_app_enabled(&self) -> bool {
+        self.github_app_id.is_some()
+            && (self.github_app_private_key.is_some() || self.github_app_private_key_path.is_some())
     }
 
     pub fn ignore_glob_list(&self) -> Vec<String> {
@@ -247,6 +276,15 @@ impl Settings {
                 LlmBackendKind::Codex,
                 LlmBackendKind::parse,
             )?,
+            llm_fallback_backend: match env_opt("BUGBOT_LLM_FALLBACK_BACKEND") {
+                None => None,
+                Some(v) => Some(
+                    LlmBackendKind::parse(&v).ok_or_else(|| ConfigError::Invalid {
+                        key: "BUGBOT_LLM_FALLBACK_BACKEND",
+                        msg: format!("unrecognised value {v:?} (expected codex|claude)"),
+                    })?,
+                ),
+            },
 
             codex_cli_path: env_str_or("BUGBOT_CODEX_CLI_PATH", "codex"),
             codex_model: env_opt("BUGBOT_CODEX_MODEL"),
@@ -254,7 +292,7 @@ impl Settings {
             codex_timeout_seconds: env_f64("BUGBOT_CODEX_TIMEOUT_SECONDS", 900.0)?,
 
             claude_cli_path: env_str_or("BUGBOT_CLAUDE_CLI_PATH", "claude"),
-            claude_model: env_str_or("BUGBOT_CLAUDE_MODEL", "sonnet"),
+            claude_model: env_str_or("BUGBOT_CLAUDE_MODEL", "claude-sonnet-5"),
             claude_effort: env_opt("BUGBOT_CLAUDE_EFFORT"),
             claude_timeout_seconds: env_f64("BUGBOT_CLAUDE_TIMEOUT_SECONDS", 600.0)?,
             claude_allowed_tools: env_str_or("BUGBOT_CLAUDE_ALLOWED_TOOLS", "Read,Grep,Glob"),
@@ -271,6 +309,9 @@ impl Settings {
             bitbucket_timeout_seconds: env_f64("BUGBOT_BITBUCKET_TIMEOUT_SECONDS", 60.0)?,
 
             github_token: env_secret(&["BUGBOT_GITHUB_TOKEN", "GITHUB_TOKEN"]),
+            github_app_id: env_opt("BUGBOT_GITHUB_APP_ID"),
+            github_app_private_key: env_secret(&["BUGBOT_GITHUB_APP_PRIVATE_KEY"]),
+            github_app_private_key_path: env_opt("BUGBOT_GITHUB_APP_PRIVATE_KEY_PATH"),
             github_webhook_secret: env_secret(&["BUGBOT_GITHUB_WEBHOOK_SECRET"]),
             github_base_url: env_str_or("BUGBOT_GITHUB_BASE_URL", "https://api.github.com"),
             github_timeout_seconds: env_f64("BUGBOT_GITHUB_TIMEOUT_SECONDS", 60.0)?,
@@ -316,6 +357,13 @@ impl Settings {
             )?,
 
             log_level: env_str_or("BUGBOT_LOG_LEVEL", "INFO"),
+            log_utc_offset_hours: match env_opt("BUGBOT_LOG_UTC_OFFSET_HOURS") {
+                None => 0,
+                Some(v) => v.trim().parse::<i8>().map_err(|e| ConfigError::Invalid {
+                    key: "BUGBOT_LOG_UTC_OFFSET_HOURS",
+                    msg: format!("expected an integer hour offset (-23..=23), got {v:?} ({e})"),
+                })?,
+            },
         };
         s.validate()?;
         Ok(s)
@@ -325,7 +373,9 @@ impl Settings {
         if !self.bitbucket_enabled() && !self.github_enabled() {
             return Err(ConfigError::Validation(
                 "No PR provider configured. Set BUGBOT_BITBUCKET_APP_PASSWORD \
-                 (or BITBUCKET_TOKEN) and/or BUGBOT_GITHUB_TOKEN."
+                 (or BITBUCKET_TOKEN), and/or for GitHub set BUGBOT_GITHUB_TOKEN \
+                 or the GitHub App credentials (BUGBOT_GITHUB_APP_ID + \
+                 BUGBOT_GITHUB_APP_PRIVATE_KEY / _PATH)."
                     .into(),
             ));
         }
@@ -337,6 +387,19 @@ impl Settings {
         if self.github_enabled() && self.github_webhook_secret.is_none() {
             return Err(ConfigError::Validation(
                 "BUGBOT_GITHUB_WEBHOOK_SECRET is required when GitHub is enabled.".into(),
+            ));
+        }
+        // App installation tokens cannot call `GET /user`, so the bot's own
+        // login can't be auto-detected. Without it the loop guard in
+        // `interactive` can't recognise the App's own comments and would react
+        // to them (e.g. its help text contains `@bugbot review`). Require it.
+        if self.github_app_enabled() && self.interactive_enabled && self.github_bot_login.is_none()
+        {
+            return Err(ConfigError::Validation(
+                "BUGBOT_GITHUB_BOT_LOGIN is required with GitHub App auth + interactivity \
+                 (set it to your App's bot login, e.g. my-app[bot]) — installation tokens \
+                 cannot auto-detect the bot identity via GET /user."
+                    .into(),
             ));
         }
         Ok(())
