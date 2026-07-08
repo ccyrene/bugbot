@@ -234,7 +234,7 @@ All settings are env vars prefixed `BUGBOT_` (see
 | `BUGBOT_CODEX_REASONING_EFFORT` | — | `low`/`medium`/`high` |
 | `BUGBOT_CODEX_TIMEOUT_SECONDS` | `900` | per-call hard timeout (codex has none of its own) |
 | `OPENAI_API_KEY` | — | codex Path A (XOR mount `~/.codex`) |
-| `BUGBOT_CLAUDE_MODEL` | `sonnet` | claude backend only |
+| `BUGBOT_CLAUDE_MODEL` | `claude-sonnet-5` | claude backend only |
 | `ANTHROPIC_API_KEY` | — | claude Path A (XOR mount `~/.claude`) |
 | `BUGBOT_BITBUCKET_APP_PASSWORD` | — | enables Bitbucket (alias `BITBUCKET_TOKEN`) |
 | `BUGBOT_WEBHOOK_SECRET` | — | required iff Bitbucket enabled |
