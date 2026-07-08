@@ -33,7 +33,7 @@ serde_json = "1"
 
 # Webhook HMAC (RustCrypto, constant-time verify_slice)
 hmac = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 
 # GitHub App auth: RS256 JWT → installation access token. ring-backed (already
