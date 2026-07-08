@@ -33,6 +33,9 @@ pub struct Finding {
     pub line: u32,
     pub severity: Severity,
     pub category: String,
+    /// Short (3-8 word) headline, e.g. "Category enum out of sync" — rendered
+    /// as the comment's heading instead of a bare severity/category tag.
+    pub title: String,
     pub message: String,
     pub source: FindingSource,
     pub suggestion: Option<String>,
@@ -82,12 +85,13 @@ pub fn findings_schema() -> Value {
                 "items": {
                     "type": "object",
                     "additionalProperties": false,
-                    "required": ["file", "line", "severity", "category", "message", "suggestion", "suggestion_start_line"],
+                    "required": ["file", "line", "severity", "category", "title", "message", "suggestion", "suggestion_start_line"],
                     "properties": {
                         "file": { "type": "string" },
                         "line": { "type": "integer" },
                         "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
-                        "category": { "type": "string", "enum": ["security", "correctness", "data-loss", "performance", "secret-leak"] },
+                        "category": { "type": "string", "enum": ["security", "correctness", "data-loss", "performance", "secret-leak", "maintainability"] },
+                        "title": { "type": "string" },
                         "message": { "type": "string" },
                         "suggestion": { "type": ["string", "null"] },
                         "suggestion_start_line": { "type": ["integer", "null"] }
@@ -335,15 +339,24 @@ fn llm_findings_to_model(payload: &Value) -> (String, Vec<Finding>) {
             }
             None => None,
         };
+        let category = raw
+            .get("category")
+            .and_then(Value::as_str)
+            .unwrap_or("correctness")
+            .to_string();
+        let title = raw
+            .get("title")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("{category} finding"));
         findings.push(Finding {
             file: file.to_string(),
             line,
             severity,
-            category: raw
-                .get("category")
-                .and_then(Value::as_str)
-                .unwrap_or("correctness")
-                .to_string(),
+            category,
+            title,
             message: message.trim().to_string(),
             source: FindingSource::Llm,
             suggestion,
@@ -360,6 +373,7 @@ fn scanner_to_findings(hits: &[SecretFinding]) -> Vec<Finding> {
             line: h.line,
             severity: h.severity,
             category: "secret-leak".to_string(),
+            title: format!("Secret leak: {}", h.rule_name),
             message: format!(
                 "Sensitive data leak — rule **{}** (`{}`) matched. Value masked as `{}`. \
                  Rotate the credential and remove it from version control (history rewrite required).",
@@ -514,7 +528,9 @@ fn attribution_usage(name: &str, usage: &TokenUsage, marker: &str) -> String {
 
 fn format_inline_body(f: &Finding, name: &str, marker: &str, kind: ProviderKind) -> String {
     let mut parts = vec![
-        format!("**{} · {}**", severity_badge(f.severity), f.category),
+        format!("### {}", f.title),
+        String::new(),
+        format!("**{}** · {}", severity_badge(f.severity), f.category),
         String::new(),
         f.message.clone(),
     ];
@@ -560,11 +576,13 @@ fn format_grouped_inline_body(
             "".into(),
             "---".into(),
             "".into(),
+            format!("### {}", f.title),
+            "".into(),
             format!(
-                "### Line {} · {} · {}",
-                f.line,
+                "**{}** · {} · line {}",
                 severity_badge(f.severity),
-                f.category
+                f.category,
+                f.line
             ),
             "".into(),
             f.message.clone(),
@@ -629,13 +647,14 @@ fn format_summary_body(result: &ReviewResult, name: &str, marker: &str) -> Strin
         String::new(),
         format!("**Findings:** {counts}"),
         String::new(),
-        "| Severity | File | Line | Category |".into(),
-        "| --- | --- | --- | --- |".into(),
+        "| Severity | Finding | File | Line | Category |".into(),
+        "| --- | --- | --- | --- | --- |".into(),
     ];
     for f in &result.findings {
         lines.push(format!(
-            "| {} | `{}` | {} | {} |",
+            "| {} | {} | `{}` | {} | {} |",
             severity_badge(f.severity),
+            f.title,
             f.file,
             f.line,
             f.category
@@ -1040,19 +1059,21 @@ fn check_run_conclusion(result: &ReviewResult, fail_on: Severity) -> (&'static s
         return ("failure", "Review did not complete".to_string());
     }
     if result.findings.is_empty() {
-        return ("neutral", "No findings".to_string());
+        // Nothing wrong at all — the best possible outcome — reads as a
+        // green check, not a grey "neutral" dot.
+        return ("success", "No findings".to_string());
     }
-    let conclusion = if result.top_severity() >= fail_on {
-        "failure"
-    } else {
-        "success"
-    };
     let title = format!(
         "{} finding(s) — top severity: {}",
         result.findings.len(),
         result.top_severity().as_str()
     );
-    (conclusion, title)
+    if result.top_severity() >= fail_on {
+        return ("failure", title);
+    }
+    // Findings exist but none are severe enough to block — informational,
+    // worth a look, but shouldn't read as either a clean pass or a failure.
+    ("neutral", title)
 }
 
 /// JSON artefact for the CLI `--artifact` / offline eval. Redacted.
@@ -1066,6 +1087,7 @@ pub fn result_to_json(result: &ReviewResult) -> String {
                 "line": f.line,
                 "severity": f.severity.as_str(),
                 "category": f.category,
+                "title": f.title,
                 "message": f.message,
                 "source": match f.source { FindingSource::Scanner => "scanner", FindingSource::Llm => "llm" },
                 "suggestion": f.suggestion,
@@ -1099,10 +1121,42 @@ mod tests {
             line,
             severity: sev,
             category: "correctness".into(),
+            title: "test finding".into(),
             message: "msg".into(),
             source: FindingSource::Llm,
             suggestion: sug.map(str::to_string),
             suggestion_start_line: None,
+        }
+    }
+
+    #[test]
+    fn findings_schema_category_enum_matches_prompt() {
+        // prompts/system.md documents this exact category list (including
+        // in its own copy of the schema shown to the model) — codex gets
+        // `findings_schema()` as strict --output-schema, so if this enum
+        // falls behind the prompt's, the model can be told a category
+        // exists that decode-time validation then rejects. Cursor Bugbot
+        // and bugbot's own review both caught this drifting once already.
+        let schema = findings_schema();
+        let enum_values = schema["properties"]["findings"]["items"]["properties"]["category"]
+            ["enum"]
+            .as_array()
+            .expect("category enum present")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        for expected in [
+            "security",
+            "correctness",
+            "data-loss",
+            "performance",
+            "secret-leak",
+            "maintainability",
+        ] {
+            assert!(
+                enum_values.contains(&expected),
+                "findings_schema() category enum missing {expected:?} — update it alongside prompts/system.md"
+            );
         }
     }
 
@@ -1121,19 +1175,22 @@ mod tests {
     }
 
     #[test]
-    fn check_run_clean_review_is_neutral_not_failure() {
+    fn check_run_clean_review_is_success_not_neutral() {
+        // Zero findings is the best outcome — it must read as a green
+        // check, not a grey "neutral" dot (that's reserved for "found
+        // something, not blocking").
         let clean = ReviewResult::default();
         let (conclusion, _) = check_run_conclusion(&clean, Severity::Critical);
-        assert_eq!(conclusion, "neutral");
+        assert_eq!(conclusion, "success");
     }
 
     #[test]
-    fn check_run_severity_gates_failure_vs_success() {
+    fn check_run_severity_gates_neutral_vs_failure() {
         let low = ReviewResult {
             findings: vec![f("a.rs", 1, Severity::Low, None)],
             ..Default::default()
         };
-        assert_eq!(check_run_conclusion(&low, Severity::High).0, "success");
+        assert_eq!(check_run_conclusion(&low, Severity::High).0, "neutral");
 
         let critical = ReviewResult {
             findings: vec![f("a.rs", 1, Severity::Critical, None)],
