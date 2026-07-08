@@ -983,6 +983,57 @@ impl<'a> Reviewer<'a> {
         } else {
             result.posted_summary = true;
         }
+
+        self.post_check_run(result, head_commit, kind, &summary_body)
+            .await;
+    }
+
+    /// GitHub-only: surface the review as a Check Run (pass/fail icon next to
+    /// CI) in addition to the comment. No-op on Bitbucket / dry-run / missing
+    /// head sha.
+    async fn post_check_run(
+        &self,
+        result: &ReviewResult,
+        head_commit: &str,
+        kind: ProviderKind,
+        summary_body: &str,
+    ) {
+        if kind != ProviderKind::GitHub || head_commit.is_empty() {
+            return;
+        }
+        let conclusion = if result.findings.is_empty() {
+            "neutral"
+        } else if result.top_severity() >= self.s.fail_on_severity {
+            "failure"
+        } else {
+            "success"
+        };
+        let title = if result.findings.is_empty() {
+            "No findings".to_string()
+        } else {
+            format!(
+                "{} finding(s) — top severity: {}",
+                result.findings.len(),
+                result.top_severity().as_str()
+            )
+        };
+        if self.s.dry_run {
+            println!("[DRY-RUN check-run] conclusion={conclusion} title={title}\n");
+            return;
+        }
+        if let Err(e) = self
+            .provider
+            .create_check_run(
+                head_commit,
+                "bugbot review",
+                conclusion,
+                &title,
+                summary_body,
+            )
+            .await
+        {
+            tracing::warn!("failed to create check run: {e}");
+        }
     }
 }
 

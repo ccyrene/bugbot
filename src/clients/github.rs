@@ -354,6 +354,34 @@ impl GitHubClient {
         Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
     }
 
+    /// Create a completed GitHub Check Run so the review shows up as a
+    /// pass/fail check alongside CI, not just a PR comment. `conclusion` is
+    /// one of `success`/`failure`/`neutral` (GitHub's Checks API vocabulary).
+    pub async fn create_check_run(
+        &self,
+        head_sha: &str,
+        name: &str,
+        conclusion: &str,
+        title: &str,
+        summary: &str,
+    ) -> Result<Value, GitHubError> {
+        let resp = self
+            .http
+            .post(self.repo_url("/check-runs"))
+            .header(ACCEPT, ACCEPT_JSON)
+            .json(&json!({
+                "name": name,
+                "head_sha": head_sha,
+                "status": "completed",
+                "conclusion": conclusion,
+                "output": { "title": title, "summary": summary },
+            }))
+            .send()
+            .await?;
+        let resp = Self::check(resp, "create_check_run").await?;
+        Ok(resp.json::<Value>().await.unwrap_or(Value::Null))
+    }
+
     pub async fn post_inline_comment(
         &self,
         pr_id: u64,
@@ -525,5 +553,72 @@ impl GitHubClient {
                 .unwrap_or("")
                 .to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn test_client(base_url: &str) -> GitHubClient {
+        GitHubClient::new("test-token", "octo", "widget", base_url, 5.0).expect("client")
+    }
+
+    #[tokio::test]
+    async fn create_check_run_posts_expected_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/octo/widget/check-runs"))
+            .and(body_json(serde_json::json!({
+                "name": "bugbot review",
+                "head_sha": "abc123",
+                "status": "completed",
+                "conclusion": "success",
+                "output": { "title": "No findings", "summary": "all clean" },
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1,
+                "conclusion": "success"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let resp = client
+            .create_check_run(
+                "abc123",
+                "bugbot review",
+                "success",
+                "No findings",
+                "all clean",
+            )
+            .await
+            .expect("create check run");
+        assert_eq!(
+            resp.get("conclusion").and_then(Value::as_str),
+            Some("success")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_check_run_surfaces_api_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/repos/octo/widget/check-runs"))
+            .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+                "message": "Resource not accessible by integration"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = test_client(&server.uri());
+        let err = client
+            .create_check_run("abc123", "bugbot review", "success", "t", "s")
+            .await
+            .expect_err("missing Checks permission should error, not panic");
+        assert!(matches!(err, GitHubError::Api { status: 422, .. }));
     }
 }

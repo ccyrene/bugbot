@@ -65,31 +65,41 @@ webhooks are per-repo (no workspace admin available).
 
 ## 2. GitHub Check Run (show in the PR "checks" list + optional merge gate)
 
+### Status: code done, blocked on a permission grant (not yet live)
+
 ### Why
 bugbot posts **comments** only — it does NOT create a GitHub **Check Run**, so it never
 appears in the PR "checks" list (Cursor BugBot does, because it uses the Checks API). A
 check run also lets the review gate merges.
 
-### Feature
-- Add `create_check_run` (+ optional update) to `src/clients/github.rs`:
-  `POST /repos/{owner}/{repo}/check-runs` with `name` (e.g. `himari-ai review`),
-  `head_sha` (the PR head commit — already fetched as `head_commit` in `review.rs`),
-  `status`/`conclusion`, and `output` (title + summary built from the review).
-- Wire into the GitHub path of `review.rs` (after posting comments): create the check
-  run with a conclusion derived from the findings.
-- **Wire up the existing dangling gate config:** `BUGBOT_FAIL_ON_SEVERITY`
-  (`config.rs`, default `critical`) is parsed but currently used ONLY by the CLI `scan`
-  command — NOT in the webhook review path. Use it here: `conclusion = failure` if the
-  top finding severity ≥ `fail_on_severity`, else `success` (or `neutral` when no
-  findings). Mark the check as a required status check in branch protection to block
-  merge.
-- Bitbucket has no Checks API equivalent → guard on provider kind (GitHub-only).
-- Optional UX: post an `in_progress` check at review start, flip to `completed` at the end.
+### Feature (implemented)
+- `create_check_run` added to `src/clients/github.rs`: `POST /repos/{owner}/{repo}/check-runs`
+  with `name: "bugbot review"`, `head_sha` (the PR head commit), a completed `status`,
+  `conclusion`, and `output` (title + the same summary body posted as the PR comment).
+- Dispatched through `src/clients/provider.rs::Provider::create_check_run` — a no-op on
+  `Provider::Bitbucket` (no Checks API equivalent there).
+- Wired into `Reviewer::post()` in `src/review.rs` (new `post_check_run` helper, runs
+  after the summary comment on every code path, including the clone-failure and
+  LLM-failure early-outs). Skips on Bitbucket, dry-run (prints a `[DRY-RUN check-run]`
+  line instead), and when `head_commit` is empty.
+- **`BUGBOT_FAIL_ON_SEVERITY` is now wired up** for this path: `conclusion = "failure"`
+  if `top_severity() >= fail_on_severity`, `"neutral"` when there are no findings,
+  otherwise `"success"`. Still only used here — the CLI `scan` command's own usage is
+  unchanged. Marking the check as a required status check in branch protection (to
+  actually block merges) is a manual GitHub settings step, not done here.
+- Not implemented (deemed optional/YAGNI for the first cut): posting an `in_progress`
+  check at review start and flipping it to `completed` later — only the single
+  completed-with-conclusion call exists.
+- Tests: `src/clients/github.rs::tests` (wiremock) cover the success payload shape and
+  that a 4xx (e.g. missing permission) surfaces as `GitHubError::Api`, not a panic.
 
-### Permission change (GitHub App)
-Add **Checks: Read & write** to the App's repository permissions. After saving, GitHub
-requires re-accepting the new permission on each installation (approve in the
-installation settings).
+### Permission change (GitHub App) — YOU must do this, not code
+Add **Checks: Read & write** to the App's repository permissions (App settings →
+Permissions & events → Checks → Read and write → Save changes), then **re-accept** the
+new permission on the production installation (App ID 4082955, `himari-ai[bot]`) —
+GitHub gates this per-installation and won't do it silently via the API. Until this is
+done, `create_check_run` will fail with a 403/422 on every review; failure is logged
+(`tracing::warn!("failed to create check run: ...")`) and does not block comment posting.
 
 ---
 
