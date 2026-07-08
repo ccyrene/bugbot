@@ -38,7 +38,7 @@ hex = "0.4"
 
 # GitHub App auth: RS256 JWT → installation access token. ring-backed (already
 # in the tree via rustls); default `use_pem` feature gives `from_rsa_pem`.
-jsonwebtoken = "9"
+jsonwebtoken = "10"
 
 # Config / env
 dotenvy = "0.15"
