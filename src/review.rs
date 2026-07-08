@@ -48,6 +48,11 @@ pub struct ReviewResult {
     pub dry_run: bool,
     pub posted_inline: usize,
     pub posted_summary: bool,
+    /// Set when the review pipeline itself didn't complete (clone failure,
+    /// LLM error, unparsable LLM output) — as opposed to completing cleanly
+    /// with zero findings. Used to keep a Check Run from reporting
+    /// `neutral`/`success` when the review never actually ran.
+    pub aborted: bool,
 }
 
 impl ReviewResult {
@@ -737,6 +742,7 @@ impl<'a> Reviewer<'a> {
                     "Automated review skipped — bugbot could not clone the PR branch. \
                                   Scanner findings (if any) are still posted."
                         .to_string();
+                result.aborted = true;
                 self.post(&mut result, &head_commit).await;
                 return Ok(result);
             }
@@ -807,6 +813,7 @@ impl<'a> Reviewer<'a> {
                 result.summary = "Automated review failed: the LLM backend returned an error. \
                                   Scanner findings (if any) are still posted below."
                     .to_string();
+                result.aborted = true;
                 drop(clone);
                 self.post(&mut result, &head_commit).await;
                 return Ok(result);
@@ -825,6 +832,7 @@ impl<'a> Reviewer<'a> {
                 );
                 result.summary =
                     "Automated review failed: model did not return parsable JSON.".to_string();
+                result.aborted = true;
                 json!({ "summary": result.summary, "findings": [] })
             }
         };
@@ -983,7 +991,68 @@ impl<'a> Reviewer<'a> {
         } else {
             result.posted_summary = true;
         }
+
+        self.post_check_run(result, head_commit, kind, &summary_body)
+            .await;
     }
+
+    /// GitHub-only: surface the review as a Check Run (pass/fail icon next to
+    /// CI) in addition to the comment. No-op on Bitbucket / dry-run / missing
+    /// head sha.
+    async fn post_check_run(
+        &self,
+        result: &ReviewResult,
+        head_commit: &str,
+        kind: ProviderKind,
+        summary_body: &str,
+    ) {
+        if kind != ProviderKind::GitHub || head_commit.is_empty() {
+            return;
+        }
+        let (conclusion, title) = check_run_conclusion(result, self.s.fail_on_severity);
+        if self.s.dry_run {
+            println!("[DRY-RUN check-run] conclusion={conclusion} title={title}\n");
+            return;
+        }
+        if let Err(e) = self
+            .provider
+            .create_check_run(
+                head_commit,
+                "bugbot review",
+                conclusion,
+                &title,
+                summary_body,
+            )
+            .await
+        {
+            tracing::warn!("failed to create check run: {e}");
+        }
+    }
+}
+
+/// Decide the Check Run `conclusion` + `output.title` for a finished (or
+/// aborted) review. Split out from `post_check_run` so it's unit-testable
+/// without needing a live `Reviewer`/`Provider`. `aborted` always wins over
+/// `findings` being empty — a review that never ran must not read as
+/// `neutral`/`success` on a required status check.
+fn check_run_conclusion(result: &ReviewResult, fail_on: Severity) -> (&'static str, String) {
+    if result.aborted {
+        return ("failure", "Review did not complete".to_string());
+    }
+    if result.findings.is_empty() {
+        return ("neutral", "No findings".to_string());
+    }
+    let conclusion = if result.top_severity() >= fail_on {
+        "failure"
+    } else {
+        "success"
+    };
+    let title = format!(
+        "{} finding(s) — top severity: {}",
+        result.findings.len(),
+        result.top_severity().as_str()
+    );
+    (conclusion, title)
 }
 
 /// JSON artefact for the CLI `--artifact` / offline eval. Redacted.
@@ -1035,6 +1104,42 @@ mod tests {
             suggestion: sug.map(str::to_string),
             suggestion_start_line: None,
         }
+    }
+
+    #[test]
+    fn check_run_aborted_review_never_reads_as_passing() {
+        // Clone/LLM failure: no findings surfaced, but the review never ran —
+        // must be `failure`, not `neutral`/`success` (else a broken bugbot
+        // silently green-lights a required status check).
+        let aborted = ReviewResult {
+            aborted: true,
+            ..Default::default()
+        };
+        let (conclusion, title) = check_run_conclusion(&aborted, Severity::Critical);
+        assert_eq!(conclusion, "failure");
+        assert_eq!(title, "Review did not complete");
+    }
+
+    #[test]
+    fn check_run_clean_review_is_neutral_not_failure() {
+        let clean = ReviewResult::default();
+        let (conclusion, _) = check_run_conclusion(&clean, Severity::Critical);
+        assert_eq!(conclusion, "neutral");
+    }
+
+    #[test]
+    fn check_run_severity_gates_failure_vs_success() {
+        let low = ReviewResult {
+            findings: vec![f("a.rs", 1, Severity::Low, None)],
+            ..Default::default()
+        };
+        assert_eq!(check_run_conclusion(&low, Severity::High).0, "success");
+
+        let critical = ReviewResult {
+            findings: vec![f("a.rs", 1, Severity::Critical, None)],
+            ..Default::default()
+        };
+        assert_eq!(check_run_conclusion(&critical, Severity::High).0, "failure");
     }
 
     #[test]

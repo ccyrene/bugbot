@@ -292,7 +292,7 @@ impl Settings {
             codex_timeout_seconds: env_f64("BUGBOT_CODEX_TIMEOUT_SECONDS", 900.0)?,
 
             claude_cli_path: env_str_or("BUGBOT_CLAUDE_CLI_PATH", "claude"),
-            claude_model: env_str_or("BUGBOT_CLAUDE_MODEL", "sonnet"),
+            claude_model: env_str_or("BUGBOT_CLAUDE_MODEL", "claude-sonnet-5"),
             claude_effort: env_opt("BUGBOT_CLAUDE_EFFORT"),
             claude_timeout_seconds: env_f64("BUGBOT_CLAUDE_TIMEOUT_SECONDS", 600.0)?,
             claude_allowed_tools: env_str_or("BUGBOT_CLAUDE_ALLOWED_TOOLS", "Read,Grep,Glob"),
