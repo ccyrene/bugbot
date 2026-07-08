@@ -1,6 +1,6 @@
 [package]
 name = "bugbot"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 # Floor pulled up to 1.88 by jsonwebtoken -> simple_asn1 -> time 0.3.47
 # (time/time-core/time-macros require rustc 1.88). Was 1.86 (icu_normalizer).
