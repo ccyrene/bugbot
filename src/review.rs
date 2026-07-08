@@ -125,7 +125,7 @@ fn format_security_block(findings: &[SecretFinding]) -> String {
 }
 
 fn truncate_diff(diff: &str, max_chars: usize) -> String {
-    if diff.len() <= max_chars {
+    if diff.len() < max_chars {
         return diff.to_string();
     }
     let cut = diff
