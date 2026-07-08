@@ -44,6 +44,7 @@ Respond with **JSON only** — no prose, no markdown fences. Schema:
       "line": <integer — line number in the NEW file, must be a + line>,
       "severity": "critical|high|medium|low",
       "category": "security|correctness|data-loss|performance|secret-leak|maintainability",
+      "title": "3-8 word headline naming the specific problem, e.g. 'Category enum out of sync' — not 'Bug found' or the category name repeated.",
       "message": "1-3 sentence, concrete description of the bug and the fix.",
       "suggestion": "<optional: the exact replacement code, see rules below>",
       "suggestion_start_line": <optional integer: first line of the replaced range>
