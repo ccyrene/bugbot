@@ -47,7 +47,8 @@ In `src/clients/bitbucket.rs`, make `clone_username()` return
   so only that one method changes; REST is untouched.
 
 ### Verify after the fix
-- `git ls-remote https://x-bitbucket-api-token-auth:<token>@bitbucket.org/<ws>/<repo>.git` → lists refs.
+- `git ls-remote` against `https://bitbucket.org/<ws>/<repo>.git`, authenticated as
+  username `x-bitbucket-api-token-auth` with the API token as the password → lists refs.
 - REST still 200 with the email username.
 - End-to-end: open/update a Bitbucket PR on a repo whose webhook points at
   `…/webhook/bitbucket` → bugbot clones + reviews.
