@@ -87,7 +87,7 @@ pub fn findings_schema() -> Value {
                         "file": { "type": "string" },
                         "line": { "type": "integer" },
                         "severity": { "type": "string", "enum": ["critical", "high", "medium", "low"] },
-                        "category": { "type": "string", "enum": ["security", "correctness", "data-loss", "performance", "secret-leak"] },
+                        "category": { "type": "string", "enum": ["security", "correctness", "data-loss", "performance", "secret-leak", "maintainability"] },
                         "message": { "type": "string" },
                         "suggestion": { "type": ["string", "null"] },
                         "suggestion_start_line": { "type": ["integer", "null"] }
@@ -1103,6 +1103,37 @@ mod tests {
             source: FindingSource::Llm,
             suggestion: sug.map(str::to_string),
             suggestion_start_line: None,
+        }
+    }
+
+    #[test]
+    fn findings_schema_category_enum_matches_prompt() {
+        // prompts/system.md documents this exact category list (including
+        // in its own copy of the schema shown to the model) — codex gets
+        // `findings_schema()` as strict --output-schema, so if this enum
+        // falls behind the prompt's, the model can be told a category
+        // exists that decode-time validation then rejects. Cursor Bugbot
+        // and bugbot's own review both caught this drifting once already.
+        let schema = findings_schema();
+        let enum_values = schema["properties"]["findings"]["items"]["properties"]["category"]
+            ["enum"]
+            .as_array()
+            .expect("category enum present")
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        for expected in [
+            "security",
+            "correctness",
+            "data-loss",
+            "performance",
+            "secret-leak",
+            "maintainability",
+        ] {
+            assert!(
+                enum_values.contains(&expected),
+                "findings_schema() category enum missing {expected:?} — update it alongside prompts/system.md"
+            );
         }
     }
 
