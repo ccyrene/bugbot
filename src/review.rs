@@ -904,6 +904,23 @@ impl<'a> Reviewer<'a> {
             }
         };
 
+        // Post the summary first so it anchors the top of bugbot's activity
+        // in the PR timeline — the inline findings posted below are the
+        // detail a reader drills into after the overview, not the entry
+        // point.
+        let summary_body = format_summary_body(result, &name, marker);
+        if s.dry_run {
+            println!("[DRY-RUN summary]\n{summary_body}\n");
+        } else if let Err(e) = self
+            .provider
+            .post_summary_comment(result.pr_id, &summary_body)
+            .await
+        {
+            tracing::warn!("failed to post summary comment: {e}");
+        } else {
+            result.posted_summary = true;
+        }
+
         let cap = s.max_inline_comments;
         let mut posted = 0usize;
         let groups = group_findings_by_file(&result.findings);
@@ -997,19 +1014,6 @@ impl<'a> Reviewer<'a> {
             }
         }
         result.posted_inline = posted;
-
-        let summary_body = format_summary_body(result, &name, marker);
-        if s.dry_run {
-            println!("[DRY-RUN summary]\n{summary_body}\n");
-        } else if let Err(e) = self
-            .provider
-            .post_summary_comment(result.pr_id, &summary_body)
-            .await
-        {
-            tracing::warn!("failed to post summary comment: {e}");
-        } else {
-            result.posted_summary = true;
-        }
 
         self.post_check_run(result, head_commit, kind, &summary_body)
             .await;
